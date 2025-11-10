@@ -59,8 +59,6 @@ class TranslationResult:
 class SentenceAlignment:
     source_sentence: str
     target_sentence: str
-    source_index: int
-    target_index: int
     slot_matches: Dict[str, Sequence[str]]
 
 
@@ -70,5 +68,4 @@ class EvidenceBlock:
     translated_text: Optional[str]
     alignment: Sequence[SentenceAlignment]
     weight: float
-    pivot_language: Optional[str]
     metadata: Dict[str, Any] = field(default_factory=dict)

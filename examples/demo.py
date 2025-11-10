@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import pathlib
-import sys
 from dataclasses import dataclass
 from typing import Sequence
+
+import pathlib
+import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -13,23 +14,20 @@ from lbrag import (
     DocumentSegment,
     HybridRetriever,
     LBRAGPipeline,
-    PipelineConfig,
     PipelineOutput,
     PromptBuilder,
     PromptTemplate,
     Query,
     RetrievalCandidate,
     RetrievalConfig,
-    RegexSentenceSplitter,
     TranslationRequest,
     TranslationResult,
     TranslationSelector,
     WeightingConfig,
 )
-from lbrag.integrations import StaticConfidenceEstimator
 from lbrag.pipeline import Generator
 from lbrag.retrieval import Retriever
-from lbrag.translation import SupportsBackTranslation
+from lbrag.translation import SimpleSentenceSplitter
 
 
 def _mock_segments() -> Sequence[DocumentSegment]:
@@ -59,25 +57,16 @@ class StaticRetriever(Retriever):
         )
 
 
-class EchoTranslator(SupportsBackTranslation):
-    def __init__(self) -> None:
-        self._splitter = RegexSentenceSplitter()
-
+class EchoTranslator:
     def translate(self, request: TranslationRequest) -> TranslationResult:
         text = request.segment.text
-        if request.segment.language == "ja" and request.target_language == "en":
+        if request.segment.language == "ja":
             translated = "Mars is the fourth planet from the Sun, known as the Red Planet."
         else:
             translated = text
-        sentences = self._splitter.split(translated)
-        metadata = {"token_count": float(len(translated.split()))}
-        return TranslationResult(translated_text=translated, confidence=0.9, sentences=sentences, metadata=metadata)
-
-    def estimate_cost(self, request: TranslationRequest) -> float:
-        return float(max(len(request.segment.text.split()), 1))
-
-    def back_translate(self, text: str, source_language: str) -> str:
-        return text
+        splitter = SimpleSentenceSplitter()
+        sentences = splitter.split(translated)
+        return TranslationResult(translated_text=translated, confidence=0.85, sentences=sentences)
 
 
 class EchoGenerator(Generator):
@@ -117,8 +106,6 @@ def build_pipeline() -> LBRAGPipeline:
         prompt_builder=prompt_builder,
         translation_selector=selector,
         weighting=WeightingConfig(beta_search=0.6, beta_alignment=0.3, beta_slots=0.1),
-        pipeline_config=PipelineConfig(),
-        confidence_estimator=StaticConfidenceEstimator(confidence=0.9),
     )
     return pipeline
 

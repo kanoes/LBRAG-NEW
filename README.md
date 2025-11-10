@@ -4,12 +4,11 @@ Modular Python reference implementation for the Language-Bridged Retrieval-Augme
 
 ## Features
 
-- Hybrid multilingual retrieval with score normalisation, language-diversity interleaving, and optional BM25/search fallbacks.
-- Greedy translation budgeting with heuristic confidence estimation (length ratio, slot consistency, optional back-translation).
-- Selective translation pipeline supporting greedy or Hungarian sentence alignment and slot-aware diagnostics.
-- Prompt construction that enforces sentence-level citations (`[doc_id:sN]`) and weight-aware evidence ordering.
-- Metrics for response language consistency (script-aware with neutral tokens) and cost-normalised bridging efficiency.
-- Ready-to-use integrations for OpenAI chat/translation/embedding APIs, Qdrant vector search, and Tavily web search.
+- Hybrid multilingual retrieval abstraction with pluggable dense retrievers and rerankers.
+- Translation budget allocation via greedy efficiency-based selection.
+- Sentence-level alignment with slot consistency estimation for selective translations.
+- Prompt construction and weighted evidence handling tailored to cross-lingual QA.
+- Utility metrics for response language consistency and cost-normalized bridging efficiency.
 
 ## Usage
 
@@ -21,26 +20,11 @@ python examples/demo.py
 
 The demo wires mock components to showcase the pipeline flow and the structure of the generated prompt and answer.
 
-## Environment variables
-
-Real-model integrations rely on the following variables:
-
-| Variable | Purpose |
-| --- | --- |
-| `OPENAI_API_KEY` | Required for OpenAI chat, translation, embedding, and reranking adapters |
-| `TAVILY_API_KEY` | Optional key for the Tavily search retriever |
-| `QDRANT_URL` | Base URL of your Qdrant instance (defaults to `http://localhost:6333`) |
-| `QDRANT_API_KEY` | Optional API key for Qdrant |
-
-Set these before instantiating the corresponding adapters in `lbrag.integrations`.
-
 ## Extending
 
 - Implement `Retriever`, `Reranker`, `Translator`, and `Generator` protocols with your preferred models.
-- Supply `ConfidenceEstimator` implementations if you have custom translation-quality heuristics or QE models.
 - Provide document metadata such as estimated translation cost or confidence to improve selection quality.
 - Replace the default sentence splitter or alignment logic if you operate on languages with custom segmentation requirements.
-- Leverage `PipelineConfig` and `PivotStrategy` to customise pivot-language selection policies.
 
 ## License
 
