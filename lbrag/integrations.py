@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import json
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
 
@@ -237,13 +239,16 @@ class OpenAIListwiseReranker(Reranker):
     @staticmethod
     def _parse_scores(content: str, expected: int) -> Sequence[float]:
         try:
-            import json
-
-            parsed = json.loads(content)
-            if isinstance(parsed, list) and len(parsed) == expected:
-                return [float(x) for x in parsed]
+            m = re.search(r"\[[^\]]+\]", content, flags=re.S)
+            if m:
+                arr = json.loads(m.group(0))
+                if isinstance(arr, list) and len(arr) >= expected:
+                    return [float(arr[i]) for i in range(expected)]
         except Exception:
             pass
+        nums = re.findall(r"(?:^|\s)(0(?:\.\d+)?|1(?:\.0+)?)", content)
+        if len(nums) >= expected:
+            return [float(nums[i]) for i in range(expected)]
         return [0.0] * expected
 
 

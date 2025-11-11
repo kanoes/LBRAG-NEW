@@ -29,19 +29,21 @@ class TranslationPlan:
 
 
 class TranslationSelector:
-    def __init__(self, budget: float) -> None:
+    def __init__(self, budget: float, min_efficiency: float = 1e-6) -> None:
         self._budget = max(0.0, budget)
+        self._min_eff = min_efficiency
 
     def select(self, candidates: Iterable[TranslationCandidate]) -> TranslationPlan:
         pool = sorted(candidates, key=lambda c: c.efficiency, reverse=True)
-        chosen: List[TranslationCandidate] = []
-        skipped: List[TranslationCandidate] = []
-        remaining = self._budget
-        for candidate in pool:
-            if candidate.cost <= remaining:
-                chosen.append(candidate)
-                remaining -= candidate.cost
+        chosen, skipped, remaining = [], [], self._budget
+        for c in pool:
+            if c.efficiency < self._min_eff: 
+                skipped.append(c); continue
+            if c.cost <= remaining:
+                chosen.append(c); remaining -= c.cost
             else:
-                skipped.append(candidate)
+                skipped.append(c)
+        for c in sorted((x for x in skipped if x.cost <= remaining), key=lambda x: x.efficiency, reverse=True):
+            chosen.append(c); remaining -= c.cost
         spent = self._budget - remaining
-        return TranslationPlan(selected=tuple(chosen), skipped=tuple(skipped), budget=self._budget, spent=spent)
+        return TranslationPlan(tuple(chosen), tuple([x for x in skipped if x not in chosen]), self._budget, spent)

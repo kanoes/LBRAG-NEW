@@ -27,6 +27,14 @@ class SimpleSentenceSplitter:
             return (text.strip(),) if text.strip() else tuple()
         return tuple(parts)
 
+@dataclass
+class RegexSentenceSplitter:
+    pattern: re.Pattern[str] = re.compile(r"(?<=[。．！？!?]|[.!?])")
+
+    def split(self, text: str) -> Sequence[str]:
+        parts = [t.strip() for t in self.pattern.split(text) if t.strip()]
+        return tuple(parts) if parts else ((text.strip(),) if text.strip() else tuple())
+
 
 def greedy_sentence_alignment(
     source_sentences: Sequence[str],

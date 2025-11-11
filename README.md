@@ -15,7 +15,7 @@ Modular Python reference implementation for the Language-Bridged Retrieval-Augme
 Install the package into your environment and adapt the interfaces with your own retrievers, translators, and generators. A lightweight demonstration is available:
 
 ```bash
-python examples/demo.py
+python demo.py
 ```
 
 The demo wires mock components to showcase the pipeline flow and the structure of the generated prompt and answer.

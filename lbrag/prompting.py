@@ -6,6 +6,8 @@ from typing import Iterable, Sequence
 from .types import EvidenceBlock
 
 
+MAX_EVID_CHARS = 800
+
 @dataclass(frozen=True)
 class PromptTemplate:
     system_instruction: str
@@ -25,9 +27,11 @@ class PromptBuilder:
         return "\n\n".join([header, f"Question: {question}", body, citation, answer])
 
     def _render_evidence(self, evidence: Sequence[EvidenceBlock]) -> str:
-        lines = ["Evidence:"]
+        lines = ["Evidence (ranked):"]
         for block in evidence:
             base = f"[{block.segment.identifier}] ({block.segment.language})"
-            text = block.translated_text or block.segment.text
+            text = (block.translated_text or block.segment.text).strip()
+            if len(text) > MAX_EVID_CHARS:
+                text = text[:MAX_EVID_CHARS] + " ...[truncated]"
             lines.append(f"- {base}: {text}")
         return "\n".join(lines)
