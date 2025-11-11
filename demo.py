@@ -1,20 +1,27 @@
-import os
+import os, sys
 import argparse
+from dotenv import load_dotenv
 from typing import Sequence
 
-# ==== import your package modules ====
-# assume this demo.py is placed next to your package (importable as `lbrag`)
-from integrations import (
+load_dotenv()
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+# --- now import from the package "lbrag" ---
+from lbrag.integrations import (
     OpenAIEmbeddingRetriever,
     OpenAIListwiseReranker,
     OpenAITranslator,
     OpenAIChatGenerator,
 )
-from prompting import PromptBuilder, PromptTemplate
-from retrieval import HybridRetriever, RetrievalConfig
-from selection import TranslationSelector
-from pipeline import LBRAGPipeline, default_pivot, WeightingConfig
-from types import DocumentSegment, Query
+from lbrag.prompting import PromptBuilder, PromptTemplate
+from lbrag.retrieval import HybridRetriever, RetrievalConfig
+from lbrag.selection import TranslationSelector
+from lbrag.pipeline import LBRAGPipeline, default_pivot, WeightingConfig
+from lbrag.types import DocumentSegment, Query
+
 
 # ---------- tiny multilingual corpus (toy) ----------
 def build_corpus() -> tuple[Sequence[DocumentSegment], Sequence[DocumentSegment]]:

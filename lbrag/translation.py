@@ -16,6 +16,10 @@ class SentenceSplitter(Protocol):
     def split(self, text: str) -> Sequence[str]:
         ...
 
+class SupportsBackTranslation(Protocol):
+    def back_translate(self, text: str, source_language: str) -> str:
+        ...
+
 
 @dataclass
 class SimpleSentenceSplitter:

@@ -1,10 +1,20 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from dataclasses import dataclass, field
+from typing import Iterable, List, Sequence, Protocol, Any, Optional
 
 from .types import DocumentSegment
 
+
+@dataclass(frozen=True)
+class ConfidenceEstimate:
+    value: float
+    details: dict[str, Any] = field(default_factory=dict)
+    preview: Optional[str] = None
+
+class ConfidenceEstimator(Protocol):
+    def estimate(self, segment: "DocumentSegment", target_language: str) -> ConfidenceEstimate:
+        ...
 
 @dataclass(frozen=True)
 class TranslationCandidate:
