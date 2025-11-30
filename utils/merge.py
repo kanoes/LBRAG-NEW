@@ -1,7 +1,7 @@
 from pathlib import Path
 
 def merge_code_files():
-    script_dir = Path(__file__).parent
+    script_dir = Path(__file__).parent.parent
     lbrag_dir = script_dir / "lbrag"
     output_file = script_dir / "code.txt"
     

@@ -1,19 +1,17 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import List, Mapping, MutableMapping, Optional, Protocol, Sequence
-
 from .types import DocumentSegment, Query, RetrievalCandidate
 
 
 class Retriever(Protocol):
-    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
-        ...
+    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]: ...
 
 
 class Reranker(Protocol):
-    def score(self, query: Query, candidates: Sequence[DocumentSegment]) -> Sequence[float]:
-        ...
+    def score(
+        self, query: Query, candidates: Sequence[DocumentSegment]
+    ) -> Sequence[float]: ...
 
 
 @dataclass
@@ -45,7 +43,7 @@ class HybridRetriever:
     ) -> MutableMapping[str, RetrievalCandidate]:
         merged: MutableMapping[str, RetrievalCandidate] = {}
         for language, retriever in self._retrievers.items():
-            _ = language  # explicit unused binding to keep order intention clear
+            _ = language
             for candidate in retriever.retrieve(query, self._config.top_k):
                 existing = merged.get(candidate.segment.identifier)
                 if existing is None or candidate.dense_score > existing.dense_score:
@@ -53,9 +51,7 @@ class HybridRetriever:
         return merged
 
     def _apply_reranker(
-        self,
-        query: Query,
-        merged: Mapping[str, RetrievalCandidate],
+        self, query: Query, merged: Mapping[str, RetrievalCandidate]
     ) -> List[tuple[RetrievalCandidate, float]]:
         if not merged:
             return []

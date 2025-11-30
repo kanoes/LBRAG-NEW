@@ -1,24 +1,20 @@
 from __future__ import annotations
-
 import re
 from dataclasses import dataclass
 from typing import Protocol, Sequence
-
 from .types import SentenceAlignment, TranslationRequest, TranslationResult
 
 
 class Translator(Protocol):
-    def translate(self, request: TranslationRequest) -> TranslationResult:
-        ...
+    def translate(self, request: TranslationRequest) -> TranslationResult: ...
 
 
 class SentenceSplitter(Protocol):
-    def split(self, text: str) -> Sequence[str]:
-        ...
+    def split(self, text: str) -> Sequence[str]: ...
+
 
 class SupportsBackTranslation(Protocol):
-    def back_translate(self, text: str, source_language: str) -> str:
-        ...
+    def back_translate(self, text: str, source_language: str) -> str: ...
 
 
 @dataclass
@@ -31,6 +27,7 @@ class SimpleSentenceSplitter:
             return (text.strip(),) if text.strip() else tuple()
         return tuple(parts)
 
+
 @dataclass
 class RegexSentenceSplitter:
     pattern: re.Pattern[str] = re.compile(r"(?<=[。．！？!?]|[.!?])")
@@ -41,8 +38,7 @@ class RegexSentenceSplitter:
 
 
 def greedy_sentence_alignment(
-    source_sentences: Sequence[str],
-    target_sentences: Sequence[str],
+    source_sentences: Sequence[str], target_sentences: Sequence[str]
 ) -> Sequence[SentenceAlignment]:
     if not source_sentences or not target_sentences:
         return tuple()
@@ -80,7 +76,9 @@ def _extract_slot_matches(source: str, target: str) -> dict[str, Sequence[str]]:
     return slots
 
 
-def estimate_alignment_quality(alignments: Sequence[SentenceAlignment], total_sentences: int) -> tuple[float, float]:
+def estimate_alignment_quality(
+    alignments: Sequence[SentenceAlignment], total_sentences: int
+) -> tuple[float, float]:
     if total_sentences == 0:
         return 0.0, 0.0
     coverage = len(alignments) / total_sentences
@@ -93,5 +91,5 @@ def estimate_alignment_quality(alignments: Sequence[SentenceAlignment], total_se
             match_total += 1
             if values:
                 match_hits += 1
-    consistency = match_hits / match_total if match_total else 1.0
+    consistency = match_hits / match_total if match_total else 0.0
     return coverage, consistency

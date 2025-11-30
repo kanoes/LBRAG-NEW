@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Optional, Protocol, Sequence, Callable
-
 from .prompting import PromptBuilder
 from .retrieval import HybridRetriever
 from .selection import TranslationCandidate, TranslationSelector
@@ -13,14 +11,14 @@ from .translation import (
     estimate_alignment_quality,
     greedy_sentence_alignment,
 )
+from .integrations import estimate_kappa
 from .types import EvidenceBlock, Query, RetrievalCandidate, TranslationRequest
 
 PivotFn = Callable[[Sequence[RetrievalCandidate], str], str]
 
 
 class Generator(Protocol):
-    def generate(self, prompt: str) -> str:
-        ...
+    def generate(self, prompt: str) -> str: ...
 
 
 @dataclass
@@ -47,7 +45,9 @@ class PipelineOutput:
     prompt: str
 
 
-def default_pivot(cands: Sequence[RetrievalCandidate], lq: str, tau: float = 0.6) -> str:
+def default_pivot(
+    cands: Sequence[RetrievalCandidate], lq: str, tau: float = 0.6
+) -> str:
     total = max(len(cands), 1)
     lq_ratio = sum(1 for c in cands if c.segment.language == lq) / total
     return lq if lq_ratio >= tau else "en"
@@ -67,7 +67,9 @@ class LBRAGPipeline:
         pivot_selector: PivotFn = default_pivot,
     ) -> None:
         self._retriever = retriever
-        self._alpha = retriever_alpha if retriever_alpha is not None else retriever._config.alpha
+        self._alpha = (
+            retriever_alpha if retriever_alpha is not None else retriever._config.alpha
+        )
         self._translator = translator
         self._generator = generator
         self._prompt_builder = prompt_builder
@@ -92,7 +94,11 @@ class LBRAGPipeline:
         for candidate in candidates:
             metadata = candidate.segment.metadata
             confidence = float(metadata.get("translation_confidence", 1.0))
-            cost = float(metadata.get("translation_cost", self._estimate_cost(candidate.segment.text)))
+            cost = float(
+                metadata.get(
+                    "translation_cost", self._estimate_cost(candidate.segment.text)
+                )
+            )
             translated_candidates.append(
                 TranslationCandidate(
                     segment=candidate.segment,
@@ -131,8 +137,24 @@ class LBRAGPipeline:
         source_sentences = self._splitter.split(segment.text)
         alignments = greedy_sentence_alignment(source_sentences, result.sentences)
         coverage, slots = estimate_alignment_quality(alignments, len(source_sentences))
+        back_trans = None
+        if hasattr(self._translator, "back_translate"):
+            try:
+                back_trans = self._translator.back_translate(
+                    result.translated_text, segment.language
+                )
+            except Exception:
+                back_trans = None
+        kappa = estimate_kappa(segment.text, result.translated_text, back_trans, slots)
         weight = self._compute_weight(candidate, coverage, slots)
-        metadata = {"translation_confidence": result.confidence}
+        metadata = {
+            "translation_confidence": result.confidence,
+            "coverage": coverage,
+            "slot_consistency": slots,
+            "kappa": kappa,
+            "token_count": result.metadata.get("token_count"),
+            "used_pivot": self._pivot,
+        }
         return EvidenceBlock(
             segment=segment,
             translated_text=result.translated_text,
@@ -151,7 +173,11 @@ class LBRAGPipeline:
             metadata={"translation_confidence": 0.0},
         )
 
-    def _compute_weight(self, candidate: RetrievalCandidate, coverage: float, slots: float) -> float:
+    def _compute_weight(
+        self, candidate: RetrievalCandidate, coverage: float, slots: float
+    ) -> float:
         w = self._weighting
         score = candidate.final_score(alpha=self._alpha)
-        return w.beta_search * score + w.beta_alignment * coverage + w.beta_slots * slots
+        return (
+            w.beta_search * score + w.beta_alignment * coverage + w.beta_slots * slots
+        )

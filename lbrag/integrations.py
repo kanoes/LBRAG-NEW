@@ -1,22 +1,35 @@
 from __future__ import annotations
-
 import os
 import re
 import json
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
-
 import requests
 from openai import OpenAI
-
 from .retrieval import Reranker, Retriever
 from .selection import ConfidenceEstimate, ConfidenceEstimator
-from .translation import RegexSentenceSplitter, SentenceSplitter, SupportsBackTranslation, Translator
-from .types import DocumentSegment, Query, RetrievalCandidate, TranslationRequest, TranslationResult
+from .translation import (
+    RegexSentenceSplitter,
+    SentenceSplitter,
+    SupportsBackTranslation,
+    Translator,
+)
+from .types import (
+    DocumentSegment,
+    Query,
+    RetrievalCandidate,
+    TranslationRequest,
+    TranslationResult,
+)
 
 
 class OpenAIChatGenerator:
-    def __init__(self, model: str = "gpt-4o-mini", api_key: Optional[str] = None, system_instruction: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        api_key: Optional[str] = None,
+        system_instruction: str | None = None,
+    ) -> None:
         self._client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
         self._model = model
         self._system = system_instruction or "You are a helpful multilingual assistant."
@@ -45,19 +58,24 @@ class OpenAITranslator(Translator, SupportsBackTranslation):
         prompt = (
             "Translate the following passage to {lang} preserving numbers, dates, and names.\n\n"
             "Source ({source_lang}):\n{source}\n"
-        ).format(lang=request.target_language, source_lang=request.segment.language, source=request.segment.text)
+        ).format(
+            lang=request.target_language,
+            source_lang=request.segment.language,
+            source=request.segment.text,
+        )
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": "You translate precisely without omitting information."},
+                {
+                    "role": "system",
+                    "content": "You translate precisely without omitting information.",
+                },
                 {"role": "user", "content": prompt},
             ],
         )
         translated = (response.choices[0].message.content or "").strip()
         sentences = self.splitter.split(translated)
-        metadata = {
-            "token_count": self.estimate_cost(request),
-        }
+        metadata = {"token_count": self.estimate_cost(request)}
         return TranslationResult(
             translated_text=translated,
             confidence=1.0,
@@ -73,8 +91,14 @@ class OpenAITranslator(Translator, SupportsBackTranslation):
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[
-                {"role": "system", "content": "You translate precisely without omitting information."},
-                {"role": "user", "content": f"Translate this passage to {source_language}:\n{text}"},
+                {
+                    "role": "system",
+                    "content": "You translate precisely without omitting information.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate this passage to {source_language}:\n{text}",
+                },
             ],
         )
         return (response.choices[0].message.content or "").strip()
@@ -91,23 +115,29 @@ class OpenAIEmbeddingRetriever(Retriever):
         self._vectors = self._embed_documents(self.documents)
 
     def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
-        embedding = self._client.embeddings.create(model=self.embedding_model, input=query.text).data[0].embedding
+        embedding = (
+            self._client.embeddings.create(model=self.embedding_model, input=query.text)
+            .data[0]
+            .embedding
+        )
         scored = []
         for vector, segment in zip(self._vectors, self.documents):
             score = self._dot(vector, embedding)
             scored.append(
                 RetrievalCandidate(
-                    segment=segment,
-                    dense_score=score,
-                    rerank_score=None,
+                    segment=segment, dense_score=score, rerank_score=None
                 )
             )
         scored.sort(key=lambda c: c.dense_score, reverse=True)
         return tuple(scored[:top_k])
 
-    def _embed_documents(self, documents: Sequence[DocumentSegment]) -> Sequence[Sequence[float]]:
+    def _embed_documents(
+        self, documents: Sequence[DocumentSegment]
+    ) -> Sequence[Sequence[float]]:
         texts = [doc.text for doc in documents]
-        response = self._client.embeddings.create(model=self.embedding_model, input=texts)
+        response = self._client.embeddings.create(
+            model=self.embedding_model, input=texts
+        )
         return [item.embedding for item in response.data]
 
     @staticmethod
@@ -129,7 +159,9 @@ class TavilyRetriever(Retriever):
                 "query": query.text,
                 "search_depth": "advanced",
                 "max_results": top_k,
-                "include_domains": list(self.include_domains) if self.include_domains else None,
+                "include_domains": (
+                    list(self.include_domains) if self.include_domains else None
+                ),
             },
             timeout=30,
         )
@@ -158,21 +190,25 @@ class TavilyRetriever(Retriever):
 @dataclass
 class QdrantRetriever(Retriever):
     collection: str
-    url: str = field(default_factory=lambda: os.getenv("QDRANT_URL", "http://localhost:6333"))
+    url: str = field(
+        default_factory=lambda: os.getenv("QDRANT_URL", "http://localhost:6333")
+    )
     api_key: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_API_KEY"))
     embedding_model: str = "text-embedding-3-small"
     api_key_openai: Optional[str] = None
 
     def __post_init__(self) -> None:
-        self._openai = OpenAI(api_key=self.api_key_openai or os.getenv("OPENAI_API_KEY"))
+        self._openai = OpenAI(
+            api_key=self.api_key_openai or os.getenv("OPENAI_API_KEY")
+        )
 
     def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
-        embedding = self._openai.embeddings.create(model=self.embedding_model, input=query.text).data[0].embedding
-        payload = {
-            "vector": embedding,
-            "limit": top_k,
-            "with_payload": True,
-        }
+        embedding = (
+            self._openai.embeddings.create(model=self.embedding_model, input=query.text)
+            .data[0]
+            .embedding
+        )
+        payload = {"vector": embedding, "limit": top_k, "with_payload": True}
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["api-key"] = self.api_key
@@ -191,10 +227,7 @@ class QdrantRetriever(Retriever):
             text = payload.get("text") or payload.get("content", "")
             language = payload.get("language", query.language)
             segment = DocumentSegment(
-                identifier=identifier,
-                text=text,
-                language=language,
-                metadata=payload,
+                identifier=identifier, text=text, language=language, metadata=payload
             )
             candidates.append(
                 RetrievalCandidate(
@@ -214,7 +247,9 @@ class OpenAIListwiseReranker(Reranker):
     def __post_init__(self) -> None:
         self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
 
-    def score(self, query: Query, candidates: Sequence[DocumentSegment]) -> Sequence[float]:
+    def score(
+        self, query: Query, candidates: Sequence[DocumentSegment]
+    ) -> Sequence[float]:
         if not candidates:
             return tuple()
         prompt = self._build_prompt(query, candidates)
@@ -256,9 +291,25 @@ class OpenAIListwiseReranker(Reranker):
 class StaticConfidenceEstimator(ConfidenceEstimator):
     confidence: float = 1.0
 
-    def estimate(self, segment: DocumentSegment, target_language: str) -> ConfidenceEstimate:
+    def estimate(
+        self, segment: DocumentSegment, target_language: str
+    ) -> ConfidenceEstimate:
         return ConfidenceEstimate(
-            value=self.confidence,
-            details={"static": self.confidence},
-            preview=None,
+            value=self.confidence, details={"static": self.confidence}, preview=None
         )
+
+
+def estimate_kappa(
+    source: str, translated: str, back_trans: str | None, slot_consistency: float
+) -> float:
+    ls = len(source) if source else 1
+    lt = len(translated) if translated else 1
+    len_keep = min(lt / ls, ls / lt)
+    len_keep = max(0.0, min(1.0, len_keep))
+    bt = 0.0
+    if back_trans:
+        s = set(source.split())
+        b = set(back_trans.split())
+        u = s | b
+        bt = (len(s & b) / len(u)) if u else 0.0
+    return 0.4 * len_keep + 0.3 * bt + 0.3 * slot_consistency

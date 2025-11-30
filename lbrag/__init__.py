@@ -1,9 +1,18 @@
-from .metrics import cost_normalized_bridging_efficiency, response_language_consistency
+from .metrics import (
+    cost_normalized_bridging_efficiency,
+    response_language_consistency,
+    response_language_consistency_prob,
+)
 from .pipeline import LBRAGPipeline, PipelineOutput, WeightingConfig
 from .prompting import PromptBuilder, PromptTemplate
 from .retrieval import HybridRetriever, RetrievalConfig
 from .selection import TranslationCandidate, TranslationPlan, TranslationSelector
-from .translation import SimpleSentenceSplitter, estimate_alignment_quality, greedy_sentence_alignment
+from .translation import (
+    SimpleSentenceSplitter,
+    estimate_alignment_quality,
+    greedy_sentence_alignment,
+)
+from .integrations import estimate_kappa
 from .types import (
     DocumentSegment,
     EvidenceBlock,
@@ -17,6 +26,7 @@ from .types import (
 __all__ = [
     "cost_normalized_bridging_efficiency",
     "response_language_consistency",
+    "response_language_consistency_prob",
     "LBRAGPipeline",
     "PipelineOutput",
     "WeightingConfig",
@@ -30,6 +40,7 @@ __all__ = [
     "SimpleSentenceSplitter",
     "estimate_alignment_quality",
     "greedy_sentence_alignment",
+    "estimate_kappa",
     "DocumentSegment",
     "EvidenceBlock",
     "Query",

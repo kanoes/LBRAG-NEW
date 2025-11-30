@@ -1,12 +1,10 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Iterable, Sequence
-
 from .types import EvidenceBlock
 
-
 MAX_EVID_CHARS = 800
+
 
 @dataclass(frozen=True)
 class PromptTemplate:
@@ -19,7 +17,9 @@ class PromptBuilder:
     def __init__(self, template: PromptTemplate) -> None:
         self._template = template
 
-    def build(self, question: str, evidence: Sequence[EvidenceBlock], target_language: str) -> str:
+    def build(
+        self, question: str, evidence: Sequence[EvidenceBlock], target_language: str
+    ) -> str:
         header = self._template.system_instruction.format(language=target_language)
         citation = self._template.citation_instruction
         body = self._render_evidence(evidence)
