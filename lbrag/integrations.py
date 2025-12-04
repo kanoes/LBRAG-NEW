@@ -4,7 +4,6 @@ import re
 import json
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
-import requests
 from openai import OpenAI
 from .retrieval import Reranker, Retriever
 from .selection import ConfidenceEstimate, ConfidenceEstimator
@@ -146,48 +145,6 @@ class OpenAIEmbeddingRetriever(Retriever):
 
 
 @dataclass
-class TavilyRetriever(Retriever):
-    api_key: Optional[str] = None
-    include_domains: Sequence[str] | None = None
-
-    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
-        key = self.api_key or os.getenv("TAVILY_API_KEY")
-        response = requests.post(
-            "https://api.tavily.com/search",
-            json={
-                "api_key": key,
-                "query": query.text,
-                "search_depth": "advanced",
-                "max_results": top_k,
-                "include_domains": (
-                    list(self.include_domains) if self.include_domains else None
-                ),
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        data = response.json()
-        candidates = []
-        for item in data.get("results", [])[:top_k]:
-            identifier = item.get("url") or item.get("title")
-            text = item.get("content") or ""
-            segment = DocumentSegment(
-                identifier=identifier,
-                text=text,
-                language=query.language,
-                metadata={"source": item.get("url"), "title": item.get("title")},
-            )
-            candidates.append(
-                RetrievalCandidate(
-                    segment=segment,
-                    dense_score=float(item.get("score", 0.0)),
-                    rerank_score=None,
-                )
-            )
-        return tuple(candidates)
-
-
-@dataclass
 class QdrantRetriever(Retriever):
     collection: str
     url: str = field(
@@ -212,6 +169,7 @@ class QdrantRetriever(Retriever):
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["api-key"] = self.api_key
+        import requests
         response = requests.post(
             f"{self.url}/collections/{self.collection}/points/search",
             json=payload,

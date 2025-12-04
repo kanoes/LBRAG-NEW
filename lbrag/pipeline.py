@@ -77,6 +77,7 @@ class LBRAGPipeline:
         self._weighting = weighting.normalize()
         self._splitter = sentence_splitter or SimpleSentenceSplitter()
         self._pivot_selector = pivot_selector
+        self._pivot: str = "en"
 
     def run(self, query: Query) -> PipelineOutput:
         candidates = self._retriever.retrieve(query)
@@ -93,7 +94,11 @@ class LBRAGPipeline:
         translated_candidates = []
         for candidate in candidates:
             metadata = candidate.segment.metadata
-            confidence = float(metadata.get("translation_confidence", 1.0))
+            raw_conf = metadata.get("translation_confidence")
+            if raw_conf is not None:
+                confidence = float(raw_conf)
+            else:
+                confidence = self._estimate_confidence(candidate.segment.language)
             cost = float(
                 metadata.get(
                     "translation_cost", self._estimate_cost(candidate.segment.text)
@@ -112,6 +117,13 @@ class LBRAGPipeline:
     def _estimate_cost(self, text: str) -> float:
         tokens = max(len(text) // 3, 1)
         return float(tokens)
+
+    def _estimate_confidence(self, lang: str) -> float:
+        if lang == self._pivot:
+            return 1.0
+        if lang == "en" or self._pivot == "en":
+            return 0.9
+        return 0.7
 
     def _build_evidence_blocks(
         self,
@@ -148,7 +160,7 @@ class LBRAGPipeline:
         kappa = estimate_kappa(segment.text, result.translated_text, back_trans, slots)
         weight = self._compute_weight(candidate, coverage, slots)
         metadata = {
-            "translation_confidence": result.confidence,
+            "translation_confidence": kappa,
             "coverage": coverage,
             "slot_consistency": slots,
             "kappa": kappa,
