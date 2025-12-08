@@ -1,0 +1,27 @@
+Total unique semantic questions (quids): 10000
+
+Language coverage distribution per question:
+  21 languages: 10000
+
+Per-language question counts:
+  ar: 10000
+  de: 10000
+  en: 10000
+  es: 10000
+  fi: 10000
+  fr: 10000
+  he: 10000
+  it: 10000
+  ja: 10000
+  ko: 10000
+  ms: 10000
+  nl: 10000
+  no: 10000
+  pl: 10000
+  pt: 10000
+  ru: 10000
+  sv: 10000
+  th: 10000
+  tr: 10000
+  vi: 10000
+  zh_cn: 10000

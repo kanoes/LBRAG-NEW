@@ -108,6 +108,7 @@ class OpenAIEmbeddingRetriever(Retriever):
     documents: Sequence[DocumentSegment]
     embedding_model: str = "text-embedding-3-small"
     api_key: Optional[str] = None
+    exclude_same_language: bool = False
 
     def __post_init__(self) -> None:
         self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
@@ -121,6 +122,8 @@ class OpenAIEmbeddingRetriever(Retriever):
         )
         scored = []
         for vector, segment in zip(self._vectors, self.documents):
+            if self.exclude_same_language and segment.language == query.language:
+                continue
             score = self._dot(vector, embedding)
             scored.append(
                 RetrievalCandidate(

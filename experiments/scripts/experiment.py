@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Sequence
 from datetime import datetime
 import time
+import random
 
 import matplotlib.pyplot as plt
 
@@ -38,6 +39,7 @@ class Sample:
     question: str
     question_lang: str
     answer: str | None
+    quid: int | None = None
 
 
 def load_samples(path: str) -> List[Sample]:
@@ -46,12 +48,18 @@ def load_samples(path: str) -> List[Sample]:
     def to_samples(objs: Sequence[dict]) -> List[Sample]:
         samples: List[Sample] = []
         for obj in objs:
+            quid_val = obj.get("quid")
+            try:
+                quid = int(quid_val) if quid_val is not None else None
+            except Exception:
+                quid = None
             samples.append(
                 Sample(
                     id=str(obj["id"]),
                     question=obj["question"],
                     question_lang=obj["question_lang"],
                     answer=obj.get("answer"),
+                    quid=quid,
                 )
             )
         return samples
@@ -147,7 +155,7 @@ def build_systems(samples: Sequence[Sample]) -> Dict[str, object]:
     print("[build_systems] start")
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
-    base_retriever = OpenAIEmbeddingRetriever(documents=docs)
+    base_retriever = OpenAIEmbeddingRetriever(documents=docs, exclude_same_language=True)
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")
     reranker = OpenAIListwiseReranker()
@@ -388,6 +396,50 @@ def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id:
     plt.close(fig)
 
 
+def select_samples_by_quid(
+    samples: Sequence[Sample],
+    max_samples: int | None = None,
+    seed: int = 42,
+) -> List[Sample]:
+    rng = random.Random(seed)
+    groups: Dict[int | str, List[Sample]] = {}
+    order: List[int | str] = []
+
+    for s in samples:
+        if s.quid is not None:
+            key: int | str = s.quid
+        else:
+            key = s.id.rsplit("_", 1)[0]
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(s)
+
+    total_quids = len(order)
+    if max_samples is None:
+        target = total_quids
+    else:
+        target = min(max_samples, total_quids)
+
+    selected: List[Sample] = []
+    for key in order[:target]:
+        cand_group = groups[key]
+        choice = rng.choice(cand_group)
+        selected.append(choice)
+
+    if max_samples is not None and max_samples > total_quids:
+        print(
+            f"[select_samples_by_quid] requested max_samples={max_samples}, "
+            f"but only {total_quids} quids available; using {total_quids}."
+        )
+
+    print(
+        f"[select_samples_by_quid] selected {len(selected)} samples "
+        f"from {total_quids} quids"
+    )
+    return selected
+
+
 def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     print("[run_experiment] start")
     run_id = datetime.now().strftime("%Y%m%d_%H%M")
@@ -397,6 +449,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     metrics_path = os.path.join(dirs["metrics"], f"{run_id}_metrics.json")
 
     samples = load_samples(data_path)
+    samples = select_samples_by_quid(samples, max_samples=max_samples, seed=42)
     if max_samples is not None:
         samples = samples[:max_samples]
         print(f"[run_experiment] truncated to {len(samples)} samples")
