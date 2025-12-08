@@ -1,7 +1,12 @@
+import os
 import json
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Sequence
+from datetime import datetime
+import time
+
+import matplotlib.pyplot as plt
 
 from lbrag import (
     Query,
@@ -37,6 +42,7 @@ class Sample:
 
 def load_samples(path: str) -> List[Sample]:
     print(f"[load_samples] path={path}")
+
     def to_samples(objs: Sequence[dict]) -> List[Sample]:
         samples: List[Sample] = []
         for obj in objs:
@@ -242,6 +248,8 @@ def f1_score_lang(pred: str, gold: str, lang: str) -> float:
         return 0.0
     precision = overlap / len(p_tokens)
     recall = overlap / len(g_tokens)
+    if precision + recall == 0:
+        return 0.0
     return 2 * precision * recall / (precision + recall)
 
 
@@ -301,8 +309,93 @@ def evidence_block_token_count(block: EvidenceBlock):
     return block.metadata.get("token_count")
 
 
+def ensure_dirs(base_dir: str) -> Dict[str, str]:
+    answers_dir = os.path.join(base_dir, "answers")
+    metrics_dir = os.path.join(base_dir, "metrics")
+    figures_dir = os.path.join(base_dir, "figures")
+    os.makedirs(answers_dir, exist_ok=True)
+    os.makedirs(metrics_dir, exist_ok=True)
+    os.makedirs(figures_dir, exist_ok=True)
+    return {
+        "answers": answers_dir,
+        "metrics": metrics_dir,
+        "figures": figures_dir,
+    }
+
+
+def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id: str):
+    systems = ["direct", "multi", "cross", "lbrag"]
+    systems = [s for s in systems if s in metrics]
+
+    f1_vals = [metrics[s]["f1"] for s in systems]
+    em_vals = [metrics[s]["em"] for s in systems]
+    rlc_vals = [metrics[s]["rlc"] for s in systems]
+    cost_vals = [metrics[s]["cost"] for s in systems]
+    cnbe_vals = [metrics[s]["cnbe"] for s in systems]
+
+    plt.style.use("ggplot")
+
+    x = range(len(systems))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar([i - width/2 for i in x], em_vals, width, label="EM")
+    ax.bar([i + width/2 for i in x], f1_vals, width, label="F1")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(systems)
+    ax.set_ylabel("Score")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"EM / F1 by system ({run_id})")
+    ax.legend()
+    for i, v in enumerate(em_vals):
+        ax.text(i - width/2, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    for i, v in enumerate(f1_vals):
+        ax.text(i + width/2, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_em_f1.png"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(x, rlc_vals)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(systems)
+    ax.set_ylabel("RLC")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"Response Language Consistency ({run_id})")
+    for i, v in enumerate(rlc_vals):
+        ax.text(i, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_rlc.png"))
+    plt.close(fig)
+
+    fig, ax1 = plt.subplots(figsize=(7, 4))
+    ax1.bar(x, cost_vals, label="Avg translation tokens")
+    ax1.set_xticks(list(x))
+    ax1.set_xticklabels(systems)
+    ax1.set_ylabel("Avg translation tokens")
+    ax1.set_title(f"Translation cost & CNBE ({run_id})")
+
+    ax2 = ax1.twinx()
+    ax2.plot(list(x), cnbe_vals, marker="o", label="CNBE")
+    ax2.set_ylabel("CNBE")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_cost_cnbe.png"))
+    plt.close(fig)
+
+
 def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     print("[run_experiment] start")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M")
+    base_dir = os.path.join("experiments", "results", run_id)
+    dirs = ensure_dirs(base_dir)
+    answers_path = os.path.join(dirs["answers"], f"{run_id}_answers.jsonl")
+    metrics_path = os.path.join(dirs["metrics"], f"{run_id}_metrics.json")
+
     samples = load_samples(data_path)
     if max_samples is not None:
         samples = samples[:max_samples]
@@ -320,34 +413,56 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             "cost": 0.0,
             "n": 0.0,
         }
+
     total_samples = len(samples)
-    for idx, s in enumerate(samples, start=1):
-        print(f"[run_experiment] sample {idx}/{total_samples} id={s.id} lang={s.question_lang}")
-        gold_text = s.answer or ""
-        q = Query(text=s.question, language=s.question_lang, metadata={"id": s.id})
-        for name, pipe in systems.items():
-            print(f"  [system:{name}] running...", end="", flush=True)
-            out: PipelineOutput = pipe.run(q)  # type: ignore
-            ans = out.answer or ""
-            em = exact_match(ans, gold_text)
-            f1 = f1_score_lang(ans, gold_text, s.question_lang)
-            rlc = compute_rlc(ans, s.question_lang)
-            rlc_ok = rlc_binary(ans, s.question_lang)
-            cost = total_translation_tokens(out.evidence)
-            agg[name]["em"] += em
-            agg[name]["f1"] += f1
-            agg[name]["rlc"] += rlc
-            agg[name]["rlc_ok"] += rlc_ok
-            agg[name]["cost"] += cost
-            agg[name]["n"] += 1.0
-            print(" done")
+    with open(answers_path, "w", encoding="utf-8") as fout:
+        for idx, s in enumerate(samples, start=1):
+            print(f"[run_experiment] sample {idx}/{total_samples} id={s.id} lang={s.question_lang}")
+            gold_text = s.answer or ""
+            q = Query(text=s.question, language=s.question_lang, metadata={"id": s.id})
+            for name, pipe in systems.items():
+                print(f"  [system:{name}] running...", end="", flush=True)
+                out: PipelineOutput = pipe.run(q)  # type: ignore
+                ans = out.answer or ""
+                em = exact_match(ans, gold_text)
+                f1 = f1_score_lang(ans, gold_text, s.question_lang)
+                rlc = compute_rlc(ans, s.question_lang)
+                rlc_ok = rlc_binary(ans, s.question_lang)
+                cost = total_translation_tokens(out.evidence)
+                agg[name]["em"] += em
+                agg[name]["f1"] += f1
+                agg[name]["rlc"] += rlc
+                agg[name]["rlc_ok"] += rlc_ok
+                agg[name]["cost"] += cost
+                agg[name]["n"] += 1.0
+                row = {
+                    "run_id": run_id,
+                    "sample_id": s.id,
+                    "sample_lang": s.question_lang,
+                    "system": name,
+                    "question": s.question,
+                    "gold_answer": gold_text,
+                    "pred_answer": ans,
+                    "em": em,
+                    "f1": f1,
+                    "rlc": rlc,
+                    "rlc_ok": rlc_ok,
+                    "translate_tokens": cost,
+                }
+                fout.write(json.dumps(row, ensure_ascii=False) + "\n")
+                print(" done")
+
     baseline_f1 = 0.0
     if "direct" in agg and agg["direct"]["n"] > 0:
         baseline_f1 = agg["direct"]["f1"] / max(agg["direct"]["n"], 1.0)
     print("=== Experiment E1 Results ===")
+    print(f"Run ID: {run_id}")
+    print(f"Results dir: {base_dir}")
     print(f"Data: {data_path}")
     print(f"Baseline (for CNBE): direct (no-RAG), F1={baseline_f1:.3f}")
     print("")
+
+    metrics_out: Dict[str, Dict[str, float]] = {}
     for name in systems:
         n = max(agg[name]["n"], 1.0)
         em = agg[name]["em"] / n
@@ -359,6 +474,15 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             cnbe = 0.0
         else:
             cnbe = (f1 - baseline_f1) / cost if cost > 0.0 else 0.0
+        metrics_out[name] = {
+            "em": em,
+            "f1": f1,
+            "rlc": rlc,
+            "rlc_ok": rlc_ok,
+            "cost": cost,
+            "cnbe": cnbe,
+            "n": n,
+        }
         print(
             f"{name:6s}",
             "EM={:.3f}".format(em),
@@ -369,7 +493,26 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             "CNBE={:.5f}".format(cnbe),
         )
 
+    meta = {
+        "run_id": run_id,
+        "data_path": data_path,
+        "max_samples": max_samples,
+        "baseline_f1": baseline_f1,
+        "metrics": metrics_out,
+    }
+    with open(metrics_path, "w", encoding="utf-8") as fmeta:
+        json.dump(meta, fmeta, ensure_ascii=False, indent=2)
+
+    plot_metrics(metrics_out, dirs["figures"], run_id)
+    print(f"[run_experiment] answers saved to {answers_path}")
+    print(f"[run_experiment] metrics saved to {metrics_path}")
+    print(f"[run_experiment] figures saved to {dirs['figures']}")
+
 
 if __name__ == "__main__":
+    start_time = time.time()
     path = "experiments/data/samples_mkqa_multi.json"
-    run_experiment(path, max_samples=10)
+    max_samples = 10
+    run_experiment(path, max_samples=max_samples)
+    end_time = time.time()
+    print(f"Test sample {max_samples} Time taken: {end_time - start_time} seconds")

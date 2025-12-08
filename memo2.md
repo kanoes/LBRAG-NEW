@@ -77,7 +77,7 @@ CrossRAG 假设这些 open-domain QA 本身就“知识充足”，
 这是一个和“企业 RAG 评估”（比如专有资料）不太一样的研究问题。
 4️⃣ 那我们在 LBRAG 实验里要怎么“更合理”地用这种数据？
 你担心的点特别好，其实可以顺势设计得更细一点。
-在我们的 experiment_e1.py 里，可以专门做几件事：
+在我们的 experiment.py 里，可以专门做几件事：
 ✅ 1. 一定要加一个 no-RAG baseline system
 比如一个系统叫 "direct"：
 对于每个 sample：
