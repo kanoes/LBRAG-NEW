@@ -11,5 +11,3 @@
 
 1. 在问某种语言的问题之后，检索时检索器自动屏蔽该语言的所有文档（exclude_same_language: bool = True）
 2. 对于每一个问题，实验时随机抽选其一种语言进行测试（select_samples_by_quid）
-
-6个指标：

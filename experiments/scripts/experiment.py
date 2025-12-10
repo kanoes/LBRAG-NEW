@@ -8,6 +8,7 @@ import time
 import random
 
 import matplotlib.pyplot as plt
+from openai import OpenAI
 
 from lbrag import (
     Query,
@@ -118,6 +119,85 @@ class DirectPipeline:
         prompt = "\n\n".join(prompt_parts)
         answer = self.generator.generate(prompt)
         return PipelineOutput(answer=answer, evidence=tuple(), prompt=prompt)
+
+
+@dataclass
+class OpenAISemanticJudge:
+    model: str = "gpt-4o-mini"
+    api_key: str | None = None
+
+    def __post_init__(self) -> None:
+        self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
+
+    def score(
+        self,
+        question: str,
+        gold_answer: str,
+        pred_answer: str,
+        target_lang: str,
+    ) -> float:
+        if not gold_answer.strip():
+            return 0.0
+        if not pred_answer.strip():
+            return 0.0
+
+        system_msg = (
+            "You are a strict but fair evaluation assistant. "
+            "Given a question, a gold reference answer, and a model's predicted answer, "
+            "you judge how semantically equivalent the predicted answer is to the gold answer. "
+            "You only care about factual content relevant to the question, not style or wording. "
+            "Return a JSON object with fields 'score' (0.0 to 1.0) and 'explanation' (short text)."
+        )
+
+        user_msg = f"""
+[Question] (language: {target_lang})
+{question}
+
+[Gold Answer]
+{gold_answer}
+
+[Predicted Answer]
+{pred_answer}
+
+Please evaluate how semantically equivalent the predicted answer is to the gold answer,
+on a scale from 0.0 (completely wrong or unrelated) to 1.0 (fully correct and equivalent).
+
+Guidelines:
+- Small wording differences or rephrasings should still get a high score.
+- Numeric answers with the same value but different units formatting (e.g. "4429m" vs "4429 メートル") should be treated as equivalent.
+- If the predicted answer misses key parts of the gold answer, lower the score.
+- If the predicted answer contradicts the gold answer, score near 0.
+- Only consider content needed to answer the question.
+
+Respond ONLY with a JSON object like:
+{{"score": 0.94, "explanation": "..."}}.
+        """.strip()
+
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+            content = (response.choices[0].message.content or "").strip()
+        except Exception:
+            return 0.0
+
+        try:
+            m = re.search(r"\{.*\}", content, flags=re.S)
+            if not m:
+                return 0.0
+            obj = json.loads(m.group(0))
+            score = float(obj.get("score", 0.0))
+            if score < 0.0:
+                score = 0.0
+            if score > 1.0:
+                score = 1.0
+            return score
+        except Exception:
+            return 0.0
 
 
 def build_prompt_builder() -> PromptBuilder:
@@ -340,6 +420,7 @@ def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id:
     rlc_vals = [metrics[s]["rlc"] for s in systems]
     cost_vals = [metrics[s]["cost"] for s in systems]
     cnbe_vals = [metrics[s]["cnbe"] for s in systems]
+    semantic_score_vals = [metrics[s]["semantic_score"] for s in systems]
 
     plt.style.use("ggplot")
 
@@ -393,6 +474,19 @@ def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id:
 
     fig.tight_layout()
     fig.savefig(os.path.join(figures_dir, f"{run_id}_cost_cnbe.png"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(x, semantic_score_vals)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(systems)
+    ax.set_ylabel("Semantic Agreement Score (SAS)")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"LLM-based Semantic Agreement ({run_id})")
+    for i, v in enumerate(semantic_score_vals):
+        ax.text(i, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_semantic.png"))
     plt.close(fig)
 
 
@@ -456,6 +550,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     else:
         print(f"[run_experiment] total samples={len(samples)}")
     systems = build_systems(samples)
+    semantic_judge = OpenAISemanticJudge()
     agg: Dict[str, Dict[str, float]] = {}
     for name in systems:
         agg[name] = {
@@ -464,6 +559,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             "rlc": 0.0,
             "rlc_ok": 0.0,
             "cost": 0.0,
+            "semantic_score": 0.0,
             "n": 0.0,
         }
 
@@ -482,12 +578,14 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
                 rlc = compute_rlc(ans, s.question_lang)
                 rlc_ok = rlc_binary(ans, s.question_lang)
                 cost = total_translation_tokens(out.evidence)
+                semantic_score = semantic_judge.score(s.question, gold_text, ans, s.question_lang)
                 agg[name]["em"] += em
                 agg[name]["f1"] += f1
                 agg[name]["rlc"] += rlc
                 agg[name]["rlc_ok"] += rlc_ok
                 agg[name]["cost"] += cost
                 agg[name]["n"] += 1.0
+                agg[name]["semantic_score"] += semantic_score
                 row = {
                     "run_id": run_id,
                     "sample_id": s.id,
@@ -501,6 +599,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
                     "rlc": rlc,
                     "rlc_ok": rlc_ok,
                     "translate_tokens": cost,
+                    "semantic_score": semantic_score,
                 }
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
                 print(" done")
@@ -523,6 +622,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
         rlc = agg[name]["rlc"] / n
         rlc_ok = agg[name]["rlc_ok"] / n
         cost = agg[name]["cost"] / n
+        semantic_score = agg[name]["semantic_score"] / n
         if name == "direct" or cost <= 0.0:
             cnbe = 0.0
         else:
@@ -534,6 +634,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             "rlc_ok": rlc_ok,
             "cost": cost,
             "cnbe": cnbe,
+            "semantic_score": semantic_score,
             "n": n,
         }
         print(
@@ -544,6 +645,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             "RLC_OK={:.3f}".format(rlc_ok),
             "AvgTranslateTokens={:.1f}".format(cost),
             "CNBE={:.5f}".format(cnbe),
+            "SemanticScore={:.3f}".format(semantic_score),
         )
 
     meta = {
@@ -564,8 +666,8 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
 
 if __name__ == "__main__":
     start_time = time.time()
-    path = "experiments/data/samples_mkqa_multi.json"
-    max_samples = 10
+    path = "experiments/data/20251208_1/mkqa_samples.json"
+    max_samples = 1
     run_experiment(path, max_samples=max_samples)
     end_time = time.time()
     print(f"Test sample {max_samples} Time taken: {end_time - start_time} seconds")

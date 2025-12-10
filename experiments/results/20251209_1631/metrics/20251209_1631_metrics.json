@@ -1,0 +1,48 @@
+{
+  "run_id": "20251209_1631",
+  "data_path": "experiments/data/20251208_1/mkqa_samples.json",
+  "max_samples": 1,
+  "baseline_f1": 0.0909090909090909,
+  "metrics": {
+    "direct": {
+      "em": 0.0,
+      "f1": 0.0909090909090909,
+      "rlc": 0.9375,
+      "rlc_ok": 1.0,
+      "cost": 0.0,
+      "cnbe": 0.0,
+      "semantic_score": 0.3,
+      "n": 1.0
+    },
+    "multi": {
+      "em": 0.0,
+      "f1": 0.11764705882352941,
+      "rlc": 0.9166666666666666,
+      "rlc_ok": 1.0,
+      "cost": 0.0,
+      "cnbe": 0.0,
+      "semantic_score": 0.0,
+      "n": 1.0
+    },
+    "cross": {
+      "em": 0.0,
+      "f1": 0.1111111111111111,
+      "rlc": 0.9285714285714286,
+      "rlc_ok": 1.0,
+      "cost": 0.0,
+      "cnbe": 0.0,
+      "semantic_score": 0.6,
+      "n": 1.0
+    },
+    "lbrag": {
+      "em": 0.0,
+      "f1": 0.11764705882352941,
+      "rlc": 0.9230769230769231,
+      "rlc_ok": 1.0,
+      "cost": 0.0,
+      "cnbe": 0.0,
+      "semantic_score": 0.5,
+      "n": 1.0
+    }
+  }
+}
