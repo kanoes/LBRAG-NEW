@@ -20,38 +20,41 @@ from .types import (
     TranslationRequest,
     TranslationResult,
 )
+from utils.llm import LLMClient
 
 
 class OpenAIChatGenerator:
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4o",
         api_key: Optional[str] = None,
         system_instruction: str | None = None,
+        llm_client: LLMClient | None = None,
     ) -> None:
-        self._client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self._llm = llm_client or LLMClient(api_key=api_key)
         self._model = model
         self._system = system_instruction or "You are a helpful multilingual assistant."
 
     def generate(self, prompt: str) -> str:
-        response = self._client.chat.completions.create(
+        content, _ = self._llm.chat(
             model=self._model,
             messages=[
                 {"role": "system", "content": self._system},
                 {"role": "user", "content": prompt},
             ],
         )
-        return (response.choices[0].message.content or "").strip()
+        return content
 
 
 @dataclass
 class OpenAITranslator(Translator, SupportsBackTranslation):
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4o"
     api_key: Optional[str] = None
     splitter: SentenceSplitter = field(default_factory=RegexSentenceSplitter)
+    llm_client: LLMClient | None = None
 
     def __post_init__(self) -> None:
-        self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
 
     def translate(self, request: TranslationRequest) -> TranslationResult:
         prompt = (
@@ -62,7 +65,7 @@ class OpenAITranslator(Translator, SupportsBackTranslation):
             source_lang=request.segment.language,
             source=request.segment.text,
         )
-        response = self._client.chat.completions.create(
+        translated, _ = self._llm.chat(
             model=self.model,
             messages=[
                 {
@@ -72,7 +75,6 @@ class OpenAITranslator(Translator, SupportsBackTranslation):
                 {"role": "user", "content": prompt},
             ],
         )
-        translated = (response.choices[0].message.content or "").strip()
         sentences = self.splitter.split(translated)
         metadata = {"token_count": self.estimate_cost(request)}
         return TranslationResult(
@@ -87,7 +89,7 @@ class OpenAITranslator(Translator, SupportsBackTranslation):
         return float(tokens)
 
     def back_translate(self, text: str, source_language: str) -> str:
-        response = self._client.chat.completions.create(
+        translated, _ = self._llm.chat(
             model=self.model,
             messages=[
                 {
@@ -100,7 +102,7 @@ class OpenAITranslator(Translator, SupportsBackTranslation):
                 },
             ],
         )
-        return (response.choices[0].message.content or "").strip()
+        return translated
 
 
 @dataclass
@@ -109,17 +111,17 @@ class OpenAIEmbeddingRetriever(Retriever):
     embedding_model: str = "text-embedding-3-small"
     api_key: Optional[str] = None
     exclude_same_language: bool = False
+    llm_client: LLMClient | None = None
 
     def __post_init__(self) -> None:
-        self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
         self._vectors = self._embed_documents(self.documents)
 
     def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
-        embedding = (
-            self._client.embeddings.create(model=self.embedding_model, input=query.text)
-            .data[0]
-            .embedding
+        embedding_resp = self._llm.embed(
+            model=self.embedding_model, input=query.text
         )
+        embedding = embedding_resp.data[0].embedding
         scored = []
         for vector, segment in zip(self._vectors, self.documents):
             if self.exclude_same_language and segment.language == query.language:
@@ -137,9 +139,7 @@ class OpenAIEmbeddingRetriever(Retriever):
         self, documents: Sequence[DocumentSegment]
     ) -> Sequence[Sequence[float]]:
         texts = [doc.text for doc in documents]
-        response = self._client.embeddings.create(
-            model=self.embedding_model, input=texts
-        )
+        response = self._llm.embed(model=self.embedding_model, input=texts)
         return [item.embedding for item in response.data]
 
     @staticmethod
@@ -204,9 +204,10 @@ class QdrantRetriever(Retriever):
 class OpenAIListwiseReranker(Reranker):
     model: str = "gpt-4o-mini"
     api_key: Optional[str] = None
+    llm_client: LLMClient | None = None
 
     def __post_init__(self) -> None:
-        self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
 
     def score(
         self, query: Query, candidates: Sequence[DocumentSegment]
@@ -214,14 +215,13 @@ class OpenAIListwiseReranker(Reranker):
         if not candidates:
             return tuple()
         prompt = self._build_prompt(query, candidates)
-        response = self._client.chat.completions.create(
+        content, _ = self._llm.chat(
             model=self.model,
             messages=[
                 {"role": "system", "content": "Score relevance between 0 and 1."},
                 {"role": "user", "content": prompt},
             ],
         )
-        content = (response.choices[0].message.content or "").strip()
         scores = self._parse_scores(content, len(candidates))
         return tuple(scores)
 

@@ -8,7 +8,6 @@ import time
 import random
 
 import matplotlib.pyplot as plt
-from openai import OpenAI
 
 from lbrag import (
     Query,
@@ -28,6 +27,7 @@ from lbrag.integrations import (
 )
 from lbrag.retrieval import HybridRetriever, RetrievalConfig
 from lbrag.types import EvidenceBlock
+from utils.llm import LLMClient, format_usage_summary
 
 import dotenv
 
@@ -123,11 +123,12 @@ class DirectPipeline:
 
 @dataclass
 class OpenAISemanticJudge:
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4o"
     api_key: str | None = None
+    llm_client: LLMClient | None = None
 
     def __post_init__(self) -> None:
-        self._client = OpenAI(api_key=self.api_key or os.getenv("OPENAI_API_KEY"))
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
 
     def score(
         self,
@@ -174,14 +175,13 @@ Respond ONLY with a JSON object like:
         """.strip()
 
         try:
-            response = self._client.chat.completions.create(
+            content, _ = self._llm.chat(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_msg},
                 ],
             )
-            content = (response.choices[0].message.content or "").strip()
         except Exception:
             return 0.0
 
@@ -231,21 +231,23 @@ def samples_to_documents(samples: Sequence[Sample]) -> List[DocumentSegment]:
     return docs
 
 
-def build_systems(samples: Sequence[Sample]) -> Dict[str, object]:
+def build_systems(samples: Sequence[Sample], llm_client: LLMClient) -> Dict[str, object]:
     print("[build_systems] start")
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
-    base_retriever = OpenAIEmbeddingRetriever(documents=docs, exclude_same_language=True)
+    base_retriever = OpenAIEmbeddingRetriever(
+        documents=docs, exclude_same_language=True, llm_client=llm_client
+    )
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")
-    reranker = OpenAIListwiseReranker()
+    reranker = OpenAIListwiseReranker(llm_client=llm_client)
     hybrid = HybridRetriever(
         retrievers={"mkqa": base_retriever},
         reranker=reranker,
         config=RetrievalConfig(alpha=0.5, top_k=20),
     )
-    translator = OpenAITranslator()
-    generator = OpenAIChatGenerator()
+    translator = OpenAITranslator(llm_client=llm_client)
+    generator = OpenAIChatGenerator(llm_client=llm_client)
     builder = build_prompt_builder()
     wcfg = WeightingConfig(0.6, 0.2, 0.2)
     selector_multi = TranslationSelector(budget=0.0)
@@ -536,11 +538,9 @@ def select_samples_by_quid(
 
 def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     print("[run_experiment] start")
-    run_id = datetime.now().strftime("%Y%m%d_%H%M")
-    base_dir = os.path.join("experiments", "results", run_id)
-    dirs = ensure_dirs(base_dir)
-    answers_path = os.path.join(dirs["answers"], f"{run_id}_answers.jsonl")
-    metrics_path = os.path.join(dirs["metrics"], f"{run_id}_metrics.json")
+    start_time = datetime.now()
+    answer_rows: List[dict] = []
+    llm_client = LLMClient()
 
     samples = load_samples(data_path)
     samples = select_samples_by_quid(samples, max_samples=max_samples, seed=42)
@@ -549,8 +549,8 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
         print(f"[run_experiment] truncated to {len(samples)} samples")
     else:
         print(f"[run_experiment] total samples={len(samples)}")
-    systems = build_systems(samples)
-    semantic_judge = OpenAISemanticJudge()
+    systems = build_systems(samples, llm_client=llm_client)
+    semantic_judge = OpenAISemanticJudge(llm_client=llm_client)
     agg: Dict[str, Dict[str, float]] = {}
     for name in systems:
         agg[name] = {
@@ -564,30 +564,29 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
         }
 
     total_samples = len(samples)
-    with open(answers_path, "w", encoding="utf-8") as fout:
-        for idx, s in enumerate(samples, start=1):
-            print(f"[run_experiment] sample {idx}/{total_samples} id={s.id} lang={s.question_lang}")
-            gold_text = s.answer or ""
-            q = Query(text=s.question, language=s.question_lang, metadata={"id": s.id})
-            for name, pipe in systems.items():
-                print(f"  [system:{name}] running...", end="", flush=True)
-                out: PipelineOutput = pipe.run(q)  # type: ignore
-                ans = out.answer or ""
-                em = exact_match(ans, gold_text)
-                f1 = f1_score_lang(ans, gold_text, s.question_lang)
-                rlc = compute_rlc(ans, s.question_lang)
-                rlc_ok = rlc_binary(ans, s.question_lang)
-                cost = total_translation_tokens(out.evidence)
-                semantic_score = semantic_judge.score(s.question, gold_text, ans, s.question_lang)
-                agg[name]["em"] += em
-                agg[name]["f1"] += f1
-                agg[name]["rlc"] += rlc
-                agg[name]["rlc_ok"] += rlc_ok
-                agg[name]["cost"] += cost
-                agg[name]["n"] += 1.0
-                agg[name]["semantic_score"] += semantic_score
-                row = {
-                    "run_id": run_id,
+    for idx, s in enumerate(samples, start=1):
+        print(f"[run_experiment] sample {idx}/{total_samples} id={s.id} lang={s.question_lang}")
+        gold_text = s.answer or ""
+        q = Query(text=s.question, language=s.question_lang, metadata={"id": s.id})
+        for name, pipe in systems.items():
+            print(f"  [system:{name}] running...", end="", flush=True)
+            out: PipelineOutput = pipe.run(q)  # type: ignore
+            ans = out.answer or ""
+            em = exact_match(ans, gold_text)
+            f1 = f1_score_lang(ans, gold_text, s.question_lang)
+            rlc = compute_rlc(ans, s.question_lang)
+            rlc_ok = rlc_binary(ans, s.question_lang)
+            cost = total_translation_tokens(out.evidence)
+            semantic_score = semantic_judge.score(s.question, gold_text, ans, s.question_lang)
+            agg[name]["em"] += em
+            agg[name]["f1"] += f1
+            agg[name]["rlc"] += rlc
+            agg[name]["rlc_ok"] += rlc_ok
+            agg[name]["cost"] += cost
+            agg[name]["n"] += 1.0
+            agg[name]["semantic_score"] += semantic_score
+            answer_rows.append(
+                {
                     "sample_id": s.id,
                     "sample_lang": s.question_lang,
                     "system": name,
@@ -601,12 +600,18 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
                     "translate_tokens": cost,
                     "semantic_score": semantic_score,
                 }
-                fout.write(json.dumps(row, ensure_ascii=False) + "\n")
-                print(" done")
+            )
+            print(" done")
 
     baseline_f1 = 0.0
     if "direct" in agg and agg["direct"]["n"] > 0:
         baseline_f1 = agg["direct"]["f1"] / max(agg["direct"]["n"], 1.0)
+    end_time = datetime.now()
+    run_id = end_time.strftime("%Y%m%d_%H%M")
+    base_dir = os.path.join("experiments", "results", run_id)
+    dirs = ensure_dirs(base_dir)
+    answers_path = os.path.join(dirs["answers"], f"{run_id}_answers.jsonl")
+    metrics_path = os.path.join(dirs["metrics"], f"{run_id}_metrics.json")
     print("=== Experiment E1 Results ===")
     print(f"Run ID: {run_id}")
     print(f"Results dir: {base_dir}")
@@ -654,7 +659,14 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
         "max_samples": max_samples,
         "baseline_f1": baseline_f1,
         "metrics": metrics_out,
+        "started_at": start_time.isoformat(),
+        "finished_at": end_time.isoformat(),
+        "llm_usage": format_usage_summary(llm_client.usage),
     }
+    with open(answers_path, "w", encoding="utf-8") as fout:
+        for row in answer_rows:
+            out_row = {"run_id": run_id, **row}
+            fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
     with open(metrics_path, "w", encoding="utf-8") as fmeta:
         json.dump(meta, fmeta, ensure_ascii=False, indent=2)
 
@@ -662,6 +674,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     print(f"[run_experiment] answers saved to {answers_path}")
     print(f"[run_experiment] metrics saved to {metrics_path}")
     print(f"[run_experiment] figures saved to {dirs['figures']}")
+    print(f"[run_experiment] LLM usage summary: {format_usage_summary(llm_client.usage)}")
 
 
 if __name__ == "__main__":
