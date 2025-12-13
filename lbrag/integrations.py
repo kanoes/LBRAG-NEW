@@ -2,6 +2,8 @@ from __future__ import annotations
 import os
 import re
 import json
+import pickle
+import hashlib
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
 from openai import OpenAI
@@ -112,16 +114,71 @@ class OpenAIEmbeddingRetriever(Retriever):
     api_key: Optional[str] = None
     exclude_same_language: bool = False
     llm_client: LLMClient | None = None
+    cache_dir: Optional[str] = None
+    use_faiss: bool = True
 
     def __post_init__(self) -> None:
         self._llm = self.llm_client or LLMClient(api_key=self.api_key)
-        self._vectors = self._embed_documents(self.documents)
+        self._vectors = self._load_or_embed_documents(self.documents)
+        if self.use_faiss:
+            import numpy as np
+            import faiss
+            vectors_np = np.array(self._vectors, dtype='float32')
+            faiss.normalize_L2(vectors_np)
+            self._index = faiss.IndexFlatIP(vectors_np.shape[1])
+            self._index.add(vectors_np)
+            self._faiss_available = True
+        else:
+            self._faiss_available = False
 
     def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
         embedding_resp = self._llm.embed(
             model=self.embedding_model, input=query.text
         )
         embedding = embedding_resp.data[0].embedding
+        
+        if self._faiss_available:
+            return self._retrieve_faiss(query, embedding, top_k)
+        else:
+            return self._retrieve_linear(query, embedding, top_k)
+    
+    def _retrieve_faiss(self, query: Query, embedding: Sequence[float], top_k: int) -> Sequence[RetrievalCandidate]:
+        import numpy as np
+        query_vec = np.array([embedding], dtype='float32')
+        import faiss
+        faiss.normalize_L2(query_vec)
+        
+        if self.exclude_same_language:
+            valid_indices = [i for i, doc in enumerate(self.documents) if doc.language != query.language]
+            if not valid_indices:
+                return tuple()
+            search_k = min(len(valid_indices), top_k * 3)
+            distances, indices = self._index.search(query_vec, search_k)
+            candidates = []
+            for dist, idx in zip(distances[0], indices[0]):
+                if idx in valid_indices:
+                    candidates.append(
+                        RetrievalCandidate(
+                            segment=self.documents[idx],
+                            dense_score=float(dist),
+                            rerank_score=None
+                        )
+                    )
+                    if len(candidates) >= top_k:
+                        break
+            return tuple(candidates)
+        else:
+            distances, indices = self._index.search(query_vec, top_k)
+            return tuple([
+                RetrievalCandidate(
+                    segment=self.documents[idx],
+                    dense_score=float(dist),
+                    rerank_score=None
+                )
+                for dist, idx in zip(distances[0], indices[0])
+            ])
+    
+    def _retrieve_linear(self, query: Query, embedding: Sequence[float], top_k: int) -> Sequence[RetrievalCandidate]:
         scored = []
         for vector, segment in zip(self._vectors, self.documents):
             if self.exclude_same_language and segment.language == query.language:
@@ -135,12 +192,57 @@ class OpenAIEmbeddingRetriever(Retriever):
         scored.sort(key=lambda c: c.dense_score, reverse=True)
         return tuple(scored[:top_k])
 
+    def _load_or_embed_documents(
+        self, documents: Sequence[DocumentSegment]
+    ) -> Sequence[Sequence[float]]:
+        if self.cache_dir:
+            cache_file = self._get_cache_path(documents)
+            if os.path.exists(cache_file):
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+            
+            vectors = self._embed_documents(documents)
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(vectors, f)
+            return vectors
+        else:
+            return self._embed_documents(documents)
+
+    def _get_cache_path(self, documents: Sequence[DocumentSegment]) -> str:
+        doc_ids = [doc.identifier for doc in documents]
+        content_hash = hashlib.md5(''.join(sorted(doc_ids)).encode()).hexdigest()
+        filename = f"embeddings_{self.embedding_model}_{content_hash}.pkl"
+        return os.path.join(self.cache_dir, filename)
+
     def _embed_documents(
         self, documents: Sequence[DocumentSegment]
     ) -> Sequence[Sequence[float]]:
         texts = [doc.text for doc in documents]
-        response = self._llm.embed(model=self.embedding_model, input=texts)
-        return [item.embedding for item in response.data]
+        all_embeddings = []
+        batch_size = 2000
+        max_tokens_per_batch = 250000
+        
+        i = 0
+        while i < len(texts):
+            batch = []
+            batch_tokens = 0
+            start_idx = i
+            
+            while i < len(texts) and len(batch) < batch_size:
+                text = texts[i]
+                estimated_tokens = len(text) // 3 + 1
+                if batch and batch_tokens + estimated_tokens > max_tokens_per_batch:
+                    break
+                batch.append(text)
+                batch_tokens += estimated_tokens
+                i += 1
+            
+            if batch:
+                response = self._llm.embed(model=self.embedding_model, input=batch)
+                all_embeddings.extend([item.embedding for item in response.data])
+        
+        return all_embeddings
 
     @staticmethod
     def _dot(a: Sequence[float], b: Sequence[float]) -> float:

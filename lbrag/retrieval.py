@@ -17,7 +17,7 @@ class Reranker(Protocol):
 @dataclass
 class RetrievalConfig:
     alpha: float = 0.5
-    top_k: int = 20
+    top_k: int = 10
 
 
 class HybridRetriever:

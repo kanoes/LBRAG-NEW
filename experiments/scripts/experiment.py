@@ -111,9 +111,7 @@ class DirectPipeline:
             system_instruction,
             f"Question: {query.text}",
             "Evidence (ranked):",
-            "- [NONE] No external documents are available.",
-            "Use only your internal knowledge. If you are not sure, say you are not sure.",
-            self.template.citation_instruction,
+            "- [NONE] No external documents are available.",          self.template.citation_instruction,
             answer_instruction,
         ]
         prompt = "\n\n".join(prompt_parts)
@@ -206,7 +204,7 @@ def build_prompt_builder() -> PromptBuilder:
             "You are a careful multilingual assistant. "
             "Always answer in {language} only. "
             "Do not mix other languages. "
-            "If the evidence is insufficient, say so."
+            "Based on the evidence provided, give your best answer. "
         ),
         citation_instruction="Use [ID] to cite evidence when you rely on it.",
         answer_instruction="Answer only with a short answer in {language}, without explanation.",
@@ -231,12 +229,12 @@ def samples_to_documents(samples: Sequence[Sample]) -> List[DocumentSegment]:
     return docs
 
 
-def build_systems(samples: Sequence[Sample], llm_client: LLMClient) -> Dict[str, object]:
+def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: str) -> Dict[str, object]:
     print("[build_systems] start")
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
     base_retriever = OpenAIEmbeddingRetriever(
-        documents=docs, exclude_same_language=True, llm_client=llm_client
+        documents=docs, exclude_same_language=True, llm_client=llm_client, cache_dir=data_dir
     )
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")
@@ -303,7 +301,18 @@ def build_systems(samples: Sequence[Sample], llm_client: LLMClient) -> Dict[str,
 def normalize_text(s: str) -> str:
     s = s.lower().strip()
     s = re.sub(r"\s+", " ", s)
-    s = re.sub(r"[^0-9a-z\u4e00-\u9fff\u3040-\u30ff]+", " ", s)
+    pattern = r"[^" \
+              r"0-9" \
+              r"a-z\u00c0-\u024f" \
+              r"\u0400-\u04ff" \
+              r"\u0590-\u05ff" \
+              r"\u0600-\u06ff\ufb50-\ufdff\ufe70-\ufeff" \
+              r"\u0e00-\u0e7f" \
+              r"\u1100-\u11ff\uac00-\ud7af" \
+              r"\u3040-\u309f\u30a0-\u30ff" \
+              r"\u4e00-\u9fff" \
+              r"]+"
+    s = re.sub(pattern, " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -427,7 +436,7 @@ def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id:
     plt.style.use("ggplot")
 
     x = range(len(systems))
-    width = 0.35
+    width = 0.4
 
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.bar([i - width/2 for i in x], em_vals, width, label="EM")
@@ -536,20 +545,24 @@ def select_samples_by_quid(
     return selected
 
 
-def run_experiment(data_path: str, max_samples: int | None = None) -> None:
+def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
     print("[run_experiment] start")
     start_time = datetime.now()
     answer_rows: List[dict] = []
     llm_client = LLMClient()
 
-    samples = load_samples(data_path)
-    samples = select_samples_by_quid(samples, max_samples=max_samples, seed=42)
-    if max_samples is not None:
-        samples = samples[:max_samples]
-        print(f"[run_experiment] truncated to {len(samples)} samples")
+    all_samples = load_samples(data_path)
+    print(f"[run_experiment] loaded {len(all_samples)} samples as knowledge base")
+    
+    data_dir = os.path.dirname(data_path)
+    systems = build_systems(all_samples, llm_client=llm_client, data_dir=data_dir)
+    
+    test_queries = select_samples_by_quid(all_samples, max_samples=num_test_queries, seed=42)
+    if num_test_queries is not None:
+        test_queries = test_queries[:num_test_queries]
+        print(f"[run_experiment] selected {len(test_queries)} test queries")
     else:
-        print(f"[run_experiment] total samples={len(samples)}")
-    systems = build_systems(samples, llm_client=llm_client)
+        print(f"[run_experiment] using all {len(test_queries)} samples as test queries")
     semantic_judge = OpenAISemanticJudge(llm_client=llm_client)
     agg: Dict[str, Dict[str, float]] = {}
     for name in systems:
@@ -563,15 +576,16 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             "n": 0.0,
         }
 
-    total_samples = len(samples)
-    for idx, s in enumerate(samples, start=1):
-        print(f"[run_experiment] sample {idx}/{total_samples} id={s.id} lang={s.question_lang}")
+    total_queries = len(test_queries)
+    for idx, s in enumerate(test_queries, start=1):
+        print(f"[run_experiment] test query {idx}/{total_queries} id={s.id} lang={s.question_lang}")
         gold_text = s.answer or ""
         q = Query(text=s.question, language=s.question_lang, metadata={"id": s.id})
         for name, pipe in systems.items():
             print(f"  [system:{name}] running...", end="", flush=True)
             out: PipelineOutput = pipe.run(q)  # type: ignore
             ans = out.answer or ""
+            print(f" retrieved {len(out.evidence)} evidence blocks", end="", flush=True)
             em = exact_match(ans, gold_text)
             f1 = f1_score_lang(ans, gold_text, s.question_lang)
             rlc = compute_rlc(ans, s.question_lang)
@@ -585,6 +599,18 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
             agg[name]["cost"] += cost
             agg[name]["n"] += 1.0
             agg[name]["semantic_score"] += semantic_score
+            evidence_list = []
+            for ev_block in out.evidence:
+                ev_info = {
+                    "id": ev_block.segment.identifier,
+                    "language": ev_block.segment.language,
+                    "original_text": ev_block.segment.text[:200] + "..." if len(ev_block.segment.text) > 200 else ev_block.segment.text,
+                    "translated_text": (ev_block.translated_text[:200] + "..." if ev_block.translated_text and len(ev_block.translated_text) > 200 else ev_block.translated_text) if ev_block.translated_text else None,
+                    "weight": ev_block.weight,
+                    "metadata": ev_block.metadata,
+                }
+                evidence_list.append(ev_info)
+            
             answer_rows.append(
                 {
                     "sample_id": s.id,
@@ -599,6 +625,9 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
                     "rlc_ok": rlc_ok,
                     "translate_tokens": cost,
                     "semantic_score": semantic_score,
+                    "num_evidence": len(out.evidence),
+                    "evidence": evidence_list,
+                    "prompt": out.prompt,
                 }
             )
             print(" done")
@@ -656,7 +685,9 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
     meta = {
         "run_id": run_id,
         "data_path": data_path,
-        "max_samples": max_samples,
+        "knowledge_base_size": len(all_samples),
+        "num_test_queries": num_test_queries,
+        "actual_test_queries": len(test_queries),
         "baseline_f1": baseline_f1,
         "metrics": metrics_out,
         "started_at": start_time.isoformat(),
@@ -680,7 +711,7 @@ def run_experiment(data_path: str, max_samples: int | None = None) -> None:
 if __name__ == "__main__":
     start_time = time.time()
     path = "experiments/data/20251208_1/mkqa_samples.json"
-    max_samples = 1
-    run_experiment(path, max_samples=max_samples)
+    num_test_queries = 1
+    run_experiment(path, num_test_queries=num_test_queries)
     end_time = time.time()
-    print(f"Test sample {max_samples} Time taken: {end_time - start_time} seconds")
+    print(f"Test queries: {num_test_queries}, Time taken: {end_time - start_time} seconds")
