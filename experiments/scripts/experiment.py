@@ -239,7 +239,7 @@ def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: st
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
     base_retriever = OpenAIEmbeddingRetriever(
-        documents=docs, exclude_same_language=0.5, llm_client=llm_client, cache_dir=data_dir
+        documents=docs, exclude_same_language=False, llm_client=llm_client, cache_dir=data_dir
     )
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")
