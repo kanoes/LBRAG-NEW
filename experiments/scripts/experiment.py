@@ -787,7 +787,7 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
 if __name__ == "__main__":
     start_time = time.time()
     path = "experiments/data/20251208_1/mkqa_samples.json"
-    num_test_queries = 1
+    num_test_queries = 100
     run_experiment(path, num_test_queries=num_test_queries)
     end_time = time.time()
     print(f"Test queries: {num_test_queries}, Time taken: {end_time - start_time} seconds")
