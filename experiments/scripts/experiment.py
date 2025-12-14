@@ -732,6 +732,10 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
             f"Sem={sem_mean:.3f}±{sem_std:.3f}"
         )
     print("="*100 + "\n")
+
+    baseline_f1 = 0.0
+    if "direct" in per_sample and per_sample["direct"]["f1"]:
+        baseline_f1 = float(mean(per_sample["direct"]["f1"]))
     
     end_time = datetime.now()
     run_id = end_time.strftime("%Y%m%d_%H%M")
@@ -747,9 +751,6 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
     print(f"Baseline (for CNBE): direct (no-RAG), F1={baseline_f1:.3f}")
     print("")
 
-    baseline_f1 = 0.0
-    if "direct" in per_sample and per_sample["direct"]["f1"]:
-        baseline_f1 = float(mean(per_sample["direct"]["f1"]))
     
     meta = {
         "run_id": run_id,
@@ -782,7 +783,7 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
 if __name__ == "__main__":
     start_time = time.time()
     path = "experiments/data/20251208_1/mkqa_samples.json"
-    num_test_queries = 100
+    num_test_queries = 1
     run_experiment(path, num_test_queries=num_test_queries)
     end_time = time.time()
     print(f"Test queries: {num_test_queries}, Time taken: {end_time - start_time} seconds")

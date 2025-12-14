@@ -5,4 +5,5 @@ __pycache__/
 # ignore experiment data
 experiments/data/
 *.pkl
-
+.venv/
+lbrag.egg-info/
