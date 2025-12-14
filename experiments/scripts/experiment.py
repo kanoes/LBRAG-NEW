@@ -541,6 +541,8 @@ def select_samples_by_quid(
     else:
         target = min(max_samples, total_quids)
 
+    rng.shuffle(order)
+    
     selected: List[Sample] = []
     for key in order[:target]:
         cand_group = groups[key]
