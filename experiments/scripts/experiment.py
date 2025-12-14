@@ -242,7 +242,7 @@ def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: st
     hybrid = HybridRetriever(
         retrievers={"mkqa": base_retriever},
         reranker=reranker,
-        config=RetrievalConfig(alpha=0.5, top_k=20),
+        config=RetrievalConfig(alpha=0.5, top_k=10),
     )
     translator = OpenAITranslator(llm_client=llm_client)
     generator = OpenAIChatGenerator(llm_client=llm_client)
@@ -711,7 +711,7 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
 if __name__ == "__main__":
     start_time = time.time()
     path = "experiments/data/20251208_1/mkqa_samples.json"
-    num_test_queries = 1
+    num_test_queries = 100
     run_experiment(path, num_test_queries=num_test_queries)
     end_time = time.time()
     print(f"Test queries: {num_test_queries}, Time taken: {end_time - start_time} seconds")

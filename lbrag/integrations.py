@@ -119,16 +119,11 @@ class OpenAIEmbeddingRetriever(Retriever):
 
     def __post_init__(self) -> None:
         self._llm = self.llm_client or LLMClient(api_key=self.api_key)
-        self._vectors = self._load_or_embed_documents(self.documents)
-        if self.use_faiss:
-            import numpy as np
-            import faiss
-            vectors_np = np.array(self._vectors, dtype='float32')
-            faiss.normalize_L2(vectors_np)
-            self._index = faiss.IndexFlatIP(vectors_np.shape[1])
-            self._index.add(vectors_np)
+        if self.use_faiss and self.cache_dir:
+            self._index, self._vectors = self._load_or_build_faiss_index(self.documents)
             self._faiss_available = True
         else:
+            self._vectors = self._load_or_embed_documents(self.documents)
             self._faiss_available = False
 
     def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
@@ -179,6 +174,9 @@ class OpenAIEmbeddingRetriever(Retriever):
             ])
     
     def _retrieve_linear(self, query: Query, embedding: Sequence[float], top_k: int) -> Sequence[RetrievalCandidate]:
+        if self._vectors is None:
+            self._vectors = self._load_or_embed_documents(self.documents)
+        
         scored = []
         for vector, segment in zip(self._vectors, self.documents):
             if self.exclude_same_language and segment.language == query.language:
@@ -192,6 +190,39 @@ class OpenAIEmbeddingRetriever(Retriever):
         scored.sort(key=lambda c: c.dense_score, reverse=True)
         return tuple(scored[:top_k])
 
+    def _load_or_build_faiss_index(self, documents: Sequence[DocumentSegment]):
+        import numpy as np
+        import faiss
+        
+        cache_file = self._get_cache_path(documents)
+        index_file = cache_file.replace('.pkl', '.index')
+        
+        if os.path.exists(index_file):
+            index = faiss.read_index(index_file)
+            vectors = None
+            return index, vectors
+        
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                vectors = pickle.load(f)
+        else:
+            vectors = self._embed_documents(documents)
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(vectors, f)
+        
+        vectors_np = np.array(vectors, dtype='float32')
+        faiss.normalize_L2(vectors_np)
+        index = faiss.IndexFlatIP(vectors_np.shape[1])
+        index.add(vectors_np)
+        
+        try:
+            faiss.write_index(index, index_file)
+        except (RuntimeError, OSError, IOError):
+            pass
+        
+        return index, vectors
+    
     def _load_or_embed_documents(
         self, documents: Sequence[DocumentSegment]
     ) -> Sequence[Sequence[float]]:
