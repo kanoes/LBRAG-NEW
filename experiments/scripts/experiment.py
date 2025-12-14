@@ -209,7 +209,9 @@ def build_prompt_builder() -> PromptBuilder:
             "Do not mix other languages. "
             "Based on the evidence provided, give your best answer. "
         ),
-        citation_instruction="Use [ID] to cite evidence when you rely on it.",
+        citation_instruction=(
+            "Do NOT include any citations, IDs, brackets like [..], or evidence markers in your final answer."
+        ),
         answer_instruction="Answer only with a short answer in {language}, without explanation.",
     )
     return PromptBuilder(template)
@@ -237,7 +239,7 @@ def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: st
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
     base_retriever = OpenAIEmbeddingRetriever(
-        documents=docs, exclude_same_language=True, llm_client=llm_client, cache_dir=data_dir
+        documents=docs, exclude_same_language=0.5, llm_client=llm_client, cache_dir=data_dir
     )
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")

@@ -4,6 +4,7 @@ import re
 import json
 import pickle
 import hashlib
+import random
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Sequence
 from openai import OpenAI
@@ -112,7 +113,7 @@ class OpenAIEmbeddingRetriever(Retriever):
     documents: Sequence[DocumentSegment]
     embedding_model: str = "text-embedding-3-small"
     api_key: Optional[str] = None
-    exclude_same_language: bool = False
+    exclude_same_language: bool | float = False
     llm_client: LLMClient | None = None
     cache_dir: Optional[str] = None
     use_faiss: bool = True
@@ -143,7 +144,12 @@ class OpenAIEmbeddingRetriever(Retriever):
         import faiss
         faiss.normalize_L2(query_vec)
         
-        if self.exclude_same_language:
+        # Support probabilistic exclusion: if float, use as probability
+        should_exclude = self.exclude_same_language
+        if isinstance(self.exclude_same_language, float):
+            should_exclude = random.random() < self.exclude_same_language
+        
+        if should_exclude:
             valid_indices = [i for i, doc in enumerate(self.documents) if doc.language != query.language]
             if not valid_indices:
                 return tuple()
@@ -177,9 +183,14 @@ class OpenAIEmbeddingRetriever(Retriever):
         if self._vectors is None:
             self._vectors = self._load_or_embed_documents(self.documents)
         
+        # Support probabilistic exclusion: if float, use as probability
+        should_exclude = self.exclude_same_language
+        if isinstance(self.exclude_same_language, float):
+            should_exclude = random.random() < self.exclude_same_language
+        
         scored = []
         for vector, segment in zip(self._vectors, self.documents):
-            if self.exclude_same_language and segment.language == query.language:
+            if should_exclude and segment.language == query.language:
                 continue
             score = self._dot(vector, embedding)
             scored.append(
