@@ -6,6 +6,9 @@ from typing import Dict, List, Sequence
 from datetime import datetime
 import time
 import random
+import math
+from statistics import mean, stdev
+
 
 import matplotlib.pyplot as plt
 
@@ -432,51 +435,61 @@ def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id:
     cost_vals = [metrics[s]["cost"] for s in systems]
     cnbe_vals = [metrics[s]["cnbe"] for s in systems]
     semantic_score_vals = [metrics[s]["semantic_score"] for s in systems]
+    
+    f1_stds = [metrics[s].get("f1_std", 0) for s in systems]
+    em_stds = [metrics[s].get("em_std", 0) for s in systems]
+    rlc_stds = [metrics[s].get("rlc_std", 0) for s in systems]
+    cost_stds = [metrics[s].get("cost_std", 0) for s in systems]
+    cnbe_stds = [metrics[s].get("cnbe_std", 0) for s in systems]
+    semantic_score_stds = [metrics[s].get("semantic_score_std", 0) for s in systems]
 
     plt.style.use("ggplot")
-
     x = range(len(systems))
     width = 0.4
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar([i - width/2 for i in x], em_vals, width, label="EM")
-    ax.bar([i + width/2 for i in x], f1_vals, width, label="F1")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar([i - width/2 for i in x], em_vals, width, yerr=em_stds, 
+           label="EM", capsize=5, alpha=0.8)
+    ax.bar([i + width/2 for i in x], f1_vals, width, yerr=f1_stds, 
+           label="F1", capsize=5, alpha=0.8)
     ax.set_xticks(list(x))
     ax.set_xticklabels(systems)
     ax.set_ylabel("Score")
     ax.set_ylim(0.0, 1.05)
     ax.set_title(f"EM / F1 by system ({run_id})")
     ax.legend()
-    for i, v in enumerate(em_vals):
-        ax.text(i - width/2, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
-    for i, v in enumerate(f1_vals):
-        ax.text(i + width/2, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    for i, (v, std) in enumerate(zip(em_vals, em_stds)):
+        ax.text(i - width/2, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    for i, (v, std) in enumerate(zip(f1_vals, f1_stds)):
+        ax.text(i + width/2, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
-    fig.savefig(os.path.join(figures_dir, f"{run_id}_em_f1.png"))
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_em_f1.png"), dpi=150)
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar(x, rlc_vals)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x, rlc_vals, yerr=rlc_stds, capsize=5, alpha=0.8)
     ax.set_xticks(list(x))
     ax.set_xticklabels(systems)
     ax.set_ylabel("RLC")
     ax.set_ylim(0.0, 1.05)
     ax.set_title(f"Response Language Consistency ({run_id})")
-    for i, v in enumerate(rlc_vals):
-        ax.text(i, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    for i, (v, std) in enumerate(zip(rlc_vals, rlc_stds)):
+        ax.text(i, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
-    fig.savefig(os.path.join(figures_dir, f"{run_id}_rlc.png"))
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_rlc.png"), dpi=150)
     plt.close(fig)
 
-    fig, ax1 = plt.subplots(figsize=(7, 4))
-    ax1.bar(x, cost_vals, label="Avg translation tokens")
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.bar(x, cost_vals, yerr=cost_stds, capsize=5, alpha=0.8, 
+            label="Avg translation tokens", color='skyblue')
     ax1.set_xticks(list(x))
     ax1.set_xticklabels(systems)
     ax1.set_ylabel("Avg translation tokens")
     ax1.set_title(f"Translation cost & CNBE ({run_id})")
 
     ax2 = ax1.twinx()
-    ax2.plot(list(x), cnbe_vals, marker="o", label="CNBE")
+    ax2.errorbar(list(x), cnbe_vals, yerr=cnbe_stds, marker="o", 
+                 label="CNBE", capsize=5, color='orange', linewidth=2)
     ax2.set_ylabel("CNBE")
 
     lines1, labels1 = ax1.get_legend_handles_labels()
@@ -484,20 +497,20 @@ def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id:
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
 
     fig.tight_layout()
-    fig.savefig(os.path.join(figures_dir, f"{run_id}_cost_cnbe.png"))
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_cost_cnbe.png"), dpi=150)
     plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.bar(x, semantic_score_vals)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x, semantic_score_vals, yerr=semantic_score_stds, capsize=5, alpha=0.8)
     ax.set_xticks(list(x))
     ax.set_xticklabels(systems)
     ax.set_ylabel("Semantic Agreement Score (SAS)")
     ax.set_ylim(0.0, 1.05)
     ax.set_title(f"LLM-based Semantic Agreement ({run_id})")
-    for i, v in enumerate(semantic_score_vals):
-        ax.text(i, v + 0.01, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    for i, (v, std) in enumerate(zip(semantic_score_vals, semantic_score_stds)):
+        ax.text(i, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
-    fig.savefig(os.path.join(figures_dir, f"{run_id}_semantic.png"))
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_semantic.png"), dpi=150)
     plt.close(fig)
 
 
@@ -575,6 +588,16 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
             "semantic_score": 0.0,
             "n": 0.0,
         }
+    per_sample: Dict[str, Dict[str, List[float]]] = {}
+    for name in systems:
+        per_sample[name] = {
+            "em": [],
+            "f1": [],
+            "rlc": [],
+            "rlc_ok": [],
+            "cost": [],
+            "semantic_score": [],
+        }
 
     total_queries = len(test_queries)
     for idx, s in enumerate(test_queries, start=1):
@@ -599,6 +622,12 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
             agg[name]["cost"] += cost
             agg[name]["n"] += 1.0
             agg[name]["semantic_score"] += semantic_score
+            per_sample[name]["em"].append(em)
+            per_sample[name]["f1"].append(f1)
+            per_sample[name]["rlc"].append(rlc)
+            per_sample[name]["rlc_ok"].append(rlc_ok)
+            per_sample[name]["cost"].append(cost)
+            per_sample[name]["semantic_score"].append(semantic_score)
             evidence_list = []
             for ev_block in out.evidence:
                 ev_info = {
@@ -632,15 +661,85 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
             )
             print(" done")
 
-    baseline_f1 = 0.0
-    if "direct" in agg and agg["direct"]["n"] > 0:
-        baseline_f1 = agg["direct"]["f1"] / max(agg["direct"]["n"], 1.0)
+    for name in systems:
+        if name == "direct":
+            continue
+        
+        cnbe_list: List[float] = []
+        for i in range(len(per_sample[name]["f1"])):
+            f1_rag = per_sample[name]["f1"][i]
+            f1_baseline = per_sample["direct"]["f1"][i]
+            cost_i = per_sample[name]["cost"][i]
+            
+            if cost_i and cost_i > 0.0:
+                # CNBE = (F1_improvement) / cost
+                cnbe_list.append((f1_rag - f1_baseline) / cost_i)
+            else:
+                cnbe_list.append(0.0)
+        
+        per_sample[name]["cnbe"] = cnbe_list
+    
+    per_sample["direct"]["cnbe"] = [0.0] * len(per_sample["direct"]["f1"])
+    
+    def _mean_std(xs: List[float]) -> tuple[float, float]:
+        if not xs:
+            return 0.0, 0.0
+        if len(xs) < 2:
+            return float(xs[0]), 0.0
+        return float(mean(xs)), float(stdev(xs))
+    
+    print("\n" + "="*100)
+    print("Experiment Results Summary")
+    print("="*100)
+    
+    metrics_out: Dict[str, Dict[str, float]] = {}
+    for name in systems:
+        n = float(len(per_sample[name]["f1"])) if name in per_sample else max(agg[name]["n"], 1.0)
+
+        em_mean, em_std = _mean_std(per_sample[name]["em"])
+        f1_mean, f1_std = _mean_std(per_sample[name]["f1"])
+        rlc_mean, rlc_std = _mean_std(per_sample[name]["rlc"])
+        rlc_ok_mean, rlc_ok_std = _mean_std(per_sample[name]["rlc_ok"])
+        cost_mean, cost_std = _mean_std(per_sample[name]["cost"])
+        sem_mean, sem_std = _mean_std(per_sample[name]["semantic_score"])
+        cnbe_mean, cnbe_std = _mean_std(per_sample[name]["cnbe"])
+
+        metrics_out[name] = {
+            "em": em_mean,
+            "em_std": em_std,
+            "f1": f1_mean,
+            "f1_std": f1_std,
+            "rlc": rlc_mean,
+            "rlc_std": rlc_std,
+            "rlc_ok": rlc_ok_mean,
+            "rlc_ok_std": rlc_ok_std,
+            "cost": cost_mean,
+            "cost_std": cost_std,
+            "cnbe": cnbe_mean,
+            "cnbe_std": cnbe_std,
+            "semantic_score": sem_mean,
+            "semantic_score_std": sem_std,
+            "n": n,
+        }
+
+        print(
+            f"{name:8s} | "
+            f"EM={em_mean:.3f}±{em_std:.3f} | "
+            f"F1={f1_mean:.3f}±{f1_std:.3f} | "
+            f"RLC={rlc_mean:.3f}±{rlc_std:.3f} | "
+            f"Cost={cost_mean:.1f}±{cost_std:.1f} | "
+            f"CNBE={cnbe_mean:.5f}±{cnbe_std:.5f} | "
+            f"Sem={sem_mean:.3f}±{sem_std:.3f}"
+        )
+    print("="*100 + "\n")
+    
     end_time = datetime.now()
     run_id = end_time.strftime("%Y%m%d_%H%M")
     base_dir = os.path.join("experiments", "results", run_id)
     dirs = ensure_dirs(base_dir)
     answers_path = os.path.join(dirs["answers"], f"{run_id}_answers.jsonl")
     metrics_path = os.path.join(dirs["metrics"], f"{run_id}_metrics.json")
+    
     print("=== Experiment E1 Results ===")
     print(f"Run ID: {run_id}")
     print(f"Results dir: {base_dir}")
@@ -648,40 +747,10 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
     print(f"Baseline (for CNBE): direct (no-RAG), F1={baseline_f1:.3f}")
     print("")
 
-    metrics_out: Dict[str, Dict[str, float]] = {}
-    for name in systems:
-        n = max(agg[name]["n"], 1.0)
-        em = agg[name]["em"] / n
-        f1 = agg[name]["f1"] / n
-        rlc = agg[name]["rlc"] / n
-        rlc_ok = agg[name]["rlc_ok"] / n
-        cost = agg[name]["cost"] / n
-        semantic_score = agg[name]["semantic_score"] / n
-        if name == "direct" or cost <= 0.0:
-            cnbe = 0.0
-        else:
-            cnbe = (f1 - baseline_f1) / cost if cost > 0.0 else 0.0
-        metrics_out[name] = {
-            "em": em,
-            "f1": f1,
-            "rlc": rlc,
-            "rlc_ok": rlc_ok,
-            "cost": cost,
-            "cnbe": cnbe,
-            "semantic_score": semantic_score,
-            "n": n,
-        }
-        print(
-            f"{name:6s}",
-            "EM={:.3f}".format(em),
-            "F1={:.3f}".format(f1),
-            "RLC={:.3f}".format(rlc),
-            "RLC_OK={:.3f}".format(rlc_ok),
-            "AvgTranslateTokens={:.1f}".format(cost),
-            "CNBE={:.5f}".format(cnbe),
-            "SemanticScore={:.3f}".format(semantic_score),
-        )
-
+    baseline_f1 = 0.0
+    if "direct" in per_sample and per_sample["direct"]["f1"]:
+        baseline_f1 = float(mean(per_sample["direct"]["f1"]))
+    
     meta = {
         "run_id": run_id,
         "data_path": data_path,
@@ -694,10 +763,12 @@ def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
         "finished_at": end_time.isoformat(),
         "llm_usage": format_usage_summary(llm_client.usage),
     }
+    
     with open(answers_path, "w", encoding="utf-8") as fout:
         for row in answer_rows:
             out_row = {"run_id": run_id, **row}
             fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+    
     with open(metrics_path, "w", encoding="utf-8") as fmeta:
         json.dump(meta, fmeta, ensure_ascii=False, indent=2)
 
