@@ -29,7 +29,7 @@ from lbrag.integrations import (
     OpenAIListwiseReranker,
 )
 from lbrag.retrieval import HybridRetriever, RetrievalConfig
-from lbrag.types import EvidenceBlock
+from lbrag.types import EvidenceBlock, RetrievalCandidate
 from lbrag.llm import LLMClient, format_usage_summary
 
 import dotenv
@@ -234,18 +234,55 @@ def samples_to_documents(samples: Sequence[Sample]) -> List[DocumentSegment]:
     return docs
 
 
+@dataclass
+class ExcludeSameLanguageRetriever:
+    base: OpenAIEmbeddingRetriever
+    exclude_same_language: bool | float = True
+
+    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
+        should_exclude = self.exclude_same_language
+        if isinstance(self.exclude_same_language, float):
+            should_exclude = random.random() < self.exclude_same_language
+        if not should_exclude:
+            return self.base.retrieve(query, top_k)
+        total = len(self.base.documents)
+        if total <= 0 or top_k <= 0:
+            return tuple()
+        target = min(top_k, total)
+        seen: set[str] = set()
+        out: list[RetrievalCandidate] = []
+        k = min(total, max(1, target))
+        while True:
+            candidates = self.base.retrieve(query, k)
+            for c in candidates:
+                cid = c.segment.identifier
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                if c.segment.language == query.language:
+                    continue
+                out.append(c)
+                if len(out) >= target:
+                    return tuple(out)
+            if len(seen) >= total or k >= total:
+                break
+            k = min(total, max(k + target, k * 2))
+        return tuple(out)
+
+
 def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: str) -> Dict[str, object]:
     print("[build_systems] start")
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
     base_retriever = OpenAIEmbeddingRetriever(
-        documents=docs, exclude_same_language=True, llm_client=llm_client, cache_dir=data_dir
+        documents=docs, exclude_same_language=False, llm_client=llm_client, cache_dir=data_dir
     )
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")
     reranker = OpenAIListwiseReranker(llm_client=llm_client)
+    retriever = ExcludeSameLanguageRetriever(base=base_retriever, exclude_same_language=True)
     hybrid = HybridRetriever(
-        retrievers={"mkqa": base_retriever},
+        retrievers={"mkqa": retriever},
         reranker=reranker,
         config=RetrievalConfig(alpha=0.5, top_k=10),
     )
