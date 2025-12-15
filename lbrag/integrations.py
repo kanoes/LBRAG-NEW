@@ -23,7 +23,7 @@ from .types import (
     TranslationRequest,
     TranslationResult,
 )
-from utils.llm import LLMClient
+from llm import LLMClient
 
 
 class OpenAIChatGenerator:

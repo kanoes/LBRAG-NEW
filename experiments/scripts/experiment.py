@@ -30,7 +30,7 @@ from lbrag.integrations import (
 )
 from lbrag.retrieval import HybridRetriever, RetrievalConfig
 from lbrag.types import EvidenceBlock
-from utils.llm import LLMClient, format_usage_summary
+from lbrag.llm import LLMClient, format_usage_summary
 
 import dotenv
 
@@ -239,7 +239,7 @@ def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: st
     docs = samples_to_documents(samples)
     print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
     base_retriever = OpenAIEmbeddingRetriever(
-        documents=docs, exclude_same_language=False, llm_client=llm_client, cache_dir=data_dir
+        documents=docs, exclude_same_language=True, llm_client=llm_client, cache_dir=data_dir
     )
     print("[build_systems] embeddings ready")
     print("[build_systems] creating reranker...")
