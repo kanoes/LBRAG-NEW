@@ -1,0 +1,2190 @@
+<__init__.py>
+from .metrics import (
+    cost_normalized_bridging_efficiency,
+    response_language_consistency,
+    response_language_consistency_prob,
+)
+from .pipeline import LBRAGPipeline, PipelineOutput, WeightingConfig
+from .prompting import PromptBuilder, PromptTemplate
+from .retrieval import HybridRetriever, RetrievalConfig
+from .selection import TranslationCandidate, TranslationPlan, TranslationSelector
+from .translation import (
+    SimpleSentenceSplitter,
+    estimate_alignment_quality,
+    greedy_sentence_alignment,
+)
+from .integrations import estimate_kappa
+from .types import (
+    DocumentSegment,
+    EvidenceBlock,
+    Query,
+    RetrievalCandidate,
+    SentenceAlignment,
+    TranslationRequest,
+    TranslationResult,
+)
+
+__all__ = [
+    "cost_normalized_bridging_efficiency",
+    "response_language_consistency",
+    "response_language_consistency_prob",
+    "LBRAGPipeline",
+    "PipelineOutput",
+    "WeightingConfig",
+    "PromptBuilder",
+    "PromptTemplate",
+    "HybridRetriever",
+    "RetrievalConfig",
+    "TranslationCandidate",
+    "TranslationPlan",
+    "TranslationSelector",
+    "SimpleSentenceSplitter",
+    "estimate_alignment_quality",
+    "greedy_sentence_alignment",
+    "estimate_kappa",
+    "DocumentSegment",
+    "EvidenceBlock",
+    "Query",
+    "RetrievalCandidate",
+    "SentenceAlignment",
+    "TranslationRequest",
+    "TranslationResult",
+]
+
+
+<integrations.py>
+from __future__ import annotations
+import os
+import re
+import json
+import pickle
+import hashlib
+import random
+from dataclasses import dataclass, field
+from typing import Iterable, Optional, Sequence
+from openai import OpenAI
+from .retrieval import Reranker, Retriever
+from .selection import ConfidenceEstimate, ConfidenceEstimator
+from .translation import (
+    RegexSentenceSplitter,
+    SentenceSplitter,
+    SupportsBackTranslation,
+    Translator,
+)
+from .types import (
+    DocumentSegment,
+    Query,
+    RetrievalCandidate,
+    TranslationRequest,
+    TranslationResult,
+)
+from llm import LLMClient
+
+
+class OpenAIChatGenerator:
+    def __init__(
+        self,
+        model: str = "gpt-4o",
+        api_key: Optional[str] = None,
+        system_instruction: str | None = None,
+        llm_client: LLMClient | None = None,
+    ) -> None:
+        self._llm = llm_client or LLMClient(api_key=api_key)
+        self._model = model
+        self._system = system_instruction or "You are a helpful multilingual assistant."
+
+    def generate(self, prompt: str) -> str:
+        content, _ = self._llm.chat(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": self._system},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        return content
+
+
+@dataclass
+class OpenAITranslator(Translator, SupportsBackTranslation):
+    model: str = "gpt-4o"
+    api_key: Optional[str] = None
+    splitter: SentenceSplitter = field(default_factory=RegexSentenceSplitter)
+    llm_client: LLMClient | None = None
+
+    def __post_init__(self) -> None:
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
+
+    def translate(self, request: TranslationRequest) -> TranslationResult:
+        prompt = (
+            "Translate the following passage to {lang} preserving numbers, dates, and names.\n\n"
+            "Source ({source_lang}):\n{source}\n"
+        ).format(
+            lang=request.target_language,
+            source_lang=request.segment.language,
+            source=request.segment.text,
+        )
+        translated, _ = self._llm.chat(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You translate precisely without omitting information.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+        )
+        sentences = self.splitter.split(translated)
+        metadata = {"token_count": self.estimate_cost(request)}
+        return TranslationResult(
+            translated_text=translated,
+            confidence=1.0,
+            sentences=sentences,
+            metadata=metadata,
+        )
+
+    def estimate_cost(self, request: TranslationRequest) -> float:
+        tokens = max(len(request.segment.text) // 3, 1)
+        return float(tokens)
+
+    def back_translate(self, text: str, source_language: str) -> str:
+        translated, _ = self._llm.chat(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You translate precisely without omitting information.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Translate this passage to {source_language}:\n{text}",
+                },
+            ],
+        )
+        return translated
+
+
+@dataclass
+class OpenAIEmbeddingRetriever(Retriever):
+    documents: Sequence[DocumentSegment]
+    embedding_model: str = "text-embedding-3-small"
+    api_key: Optional[str] = None
+    exclude_same_language: bool | float = False
+    llm_client: LLMClient | None = None
+    cache_dir: Optional[str] = None
+    use_faiss: bool = True
+
+    def __post_init__(self) -> None:
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
+        if self.use_faiss and self.cache_dir:
+            self._index, self._vectors = self._load_or_build_faiss_index(self.documents)
+            self._faiss_available = True
+        else:
+            self._vectors = self._load_or_embed_documents(self.documents)
+            self._faiss_available = False
+
+    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
+        embedding_resp = self._llm.embed(
+            model=self.embedding_model, input=query.text
+        )
+        embedding = embedding_resp.data[0].embedding
+        
+        if self._faiss_available:
+            return self._retrieve_faiss(query, embedding, top_k)
+        else:
+            return self._retrieve_linear(query, embedding, top_k)
+    
+    def _retrieve_faiss(self, query: Query, embedding: Sequence[float], top_k: int) -> Sequence[RetrievalCandidate]:
+        import numpy as np
+        query_vec = np.array([embedding], dtype='float32')
+        import faiss
+        faiss.normalize_L2(query_vec)
+        
+        # Support probabilistic exclusion: if float, use as probability
+        should_exclude = self.exclude_same_language
+        if isinstance(self.exclude_same_language, float):
+            should_exclude = random.random() < self.exclude_same_language
+        
+        if should_exclude:
+            valid_indices = [i for i, doc in enumerate(self.documents) if doc.language != query.language]
+            if not valid_indices:
+                return tuple()
+            search_k = min(len(valid_indices), top_k * 3)
+            distances, indices = self._index.search(query_vec, search_k)
+            candidates = []
+            for dist, idx in zip(distances[0], indices[0]):
+                if idx in valid_indices:
+                    candidates.append(
+                        RetrievalCandidate(
+                            segment=self.documents[idx],
+                            dense_score=float(dist),
+                            rerank_score=None
+                        )
+                    )
+                    if len(candidates) >= top_k:
+                        break
+            return tuple(candidates)
+        else:
+            distances, indices = self._index.search(query_vec, top_k)
+            return tuple([
+                RetrievalCandidate(
+                    segment=self.documents[idx],
+                    dense_score=float(dist),
+                    rerank_score=None
+                )
+                for dist, idx in zip(distances[0], indices[0])
+            ])
+    
+    def _retrieve_linear(self, query: Query, embedding: Sequence[float], top_k: int) -> Sequence[RetrievalCandidate]:
+        if self._vectors is None:
+            self._vectors = self._load_or_embed_documents(self.documents)
+        
+        # Support probabilistic exclusion: if float, use as probability
+        should_exclude = self.exclude_same_language
+        if isinstance(self.exclude_same_language, float):
+            should_exclude = random.random() < self.exclude_same_language
+        
+        scored = []
+        for vector, segment in zip(self._vectors, self.documents):
+            if should_exclude and segment.language == query.language:
+                continue
+            score = self._dot(vector, embedding)
+            scored.append(
+                RetrievalCandidate(
+                    segment=segment, dense_score=score, rerank_score=None
+                )
+            )
+        scored.sort(key=lambda c: c.dense_score, reverse=True)
+        return tuple(scored[:top_k])
+
+    def _load_or_build_faiss_index(self, documents: Sequence[DocumentSegment]):
+        import numpy as np
+        import faiss
+        
+        cache_file = self._get_cache_path(documents)
+        index_file = cache_file.replace('.pkl', '.index')
+        
+        if os.path.exists(index_file):
+            index = faiss.read_index(index_file)
+            vectors = None
+            return index, vectors
+        
+        if os.path.exists(cache_file):
+            with open(cache_file, 'rb') as f:
+                vectors = pickle.load(f)
+        else:
+            vectors = self._embed_documents(documents)
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(vectors, f)
+        
+        vectors_np = np.array(vectors, dtype='float32')
+        faiss.normalize_L2(vectors_np)
+        index = faiss.IndexFlatIP(vectors_np.shape[1])
+        index.add(vectors_np)
+        
+        try:
+            faiss.write_index(index, index_file)
+        except (RuntimeError, OSError, IOError):
+            pass
+        
+        return index, vectors
+    
+    def _load_or_embed_documents(
+        self, documents: Sequence[DocumentSegment]
+    ) -> Sequence[Sequence[float]]:
+        if self.cache_dir:
+            cache_file = self._get_cache_path(documents)
+            if os.path.exists(cache_file):
+                with open(cache_file, 'rb') as f:
+                    return pickle.load(f)
+            
+            vectors = self._embed_documents(documents)
+            os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+            with open(cache_file, 'wb') as f:
+                pickle.dump(vectors, f)
+            return vectors
+        else:
+            return self._embed_documents(documents)
+
+    def _get_cache_path(self, documents: Sequence[DocumentSegment]) -> str:
+        doc_ids = [doc.identifier for doc in documents]
+        content_hash = hashlib.md5(''.join(sorted(doc_ids)).encode()).hexdigest()
+        filename = f"embeddings_{self.embedding_model}_{content_hash}.pkl"
+        return os.path.join(self.cache_dir, filename)
+
+    def _embed_documents(
+        self, documents: Sequence[DocumentSegment]
+    ) -> Sequence[Sequence[float]]:
+        texts = [doc.text for doc in documents]
+        all_embeddings = []
+        batch_size = 2000
+        max_tokens_per_batch = 250000
+        
+        i = 0
+        while i < len(texts):
+            batch = []
+            batch_tokens = 0
+            start_idx = i
+            
+            while i < len(texts) and len(batch) < batch_size:
+                text = texts[i]
+                estimated_tokens = len(text) // 3 + 1
+                if batch and batch_tokens + estimated_tokens > max_tokens_per_batch:
+                    break
+                batch.append(text)
+                batch_tokens += estimated_tokens
+                i += 1
+            
+            if batch:
+                response = self._llm.embed(model=self.embedding_model, input=batch)
+                all_embeddings.extend([item.embedding for item in response.data])
+        
+        return all_embeddings
+
+    @staticmethod
+    def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+        return float(sum(x * y for x, y in zip(a, b)))
+
+
+@dataclass
+class QdrantRetriever(Retriever):
+    collection: str
+    url: str = field(
+        default_factory=lambda: os.getenv("QDRANT_URL", "http://localhost:6333")
+    )
+    api_key: Optional[str] = field(default_factory=lambda: os.getenv("QDRANT_API_KEY"))
+    embedding_model: str = "text-embedding-3-small"
+    api_key_openai: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self._openai = OpenAI(
+            api_key=self.api_key_openai or os.getenv("OPENAI_API_KEY")
+        )
+
+    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
+        embedding = (
+            self._openai.embeddings.create(model=self.embedding_model, input=query.text)
+            .data[0]
+            .embedding
+        )
+        payload = {"vector": embedding, "limit": top_k, "with_payload": True}
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["api-key"] = self.api_key
+        import requests
+        response = requests.post(
+            f"{self.url}/collections/{self.collection}/points/search",
+            json=payload,
+            headers=headers,
+            timeout=30,
+        )
+        response.raise_for_status()
+        points = response.json().get("result", [])
+        candidates = []
+        for point in points:
+            payload = point.get("payload", {})
+            identifier = str(point.get("id", payload.get("id")))
+            text = payload.get("text") or payload.get("content", "")
+            language = payload.get("language", query.language)
+            segment = DocumentSegment(
+                identifier=identifier, text=text, language=language, metadata=payload
+            )
+            candidates.append(
+                RetrievalCandidate(
+                    segment=segment,
+                    dense_score=float(point.get("score", 0.0)),
+                    rerank_score=None,
+                )
+            )
+        return tuple(candidates[:top_k])
+
+
+@dataclass
+class OpenAIListwiseReranker(Reranker):
+    model: str = "gpt-4o-mini"
+    api_key: Optional[str] = None
+    llm_client: LLMClient | None = None
+
+    def __post_init__(self) -> None:
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
+
+    def score(
+        self, query: Query, candidates: Sequence[DocumentSegment]
+    ) -> Sequence[float]:
+        if not candidates:
+            return tuple()
+        prompt = self._build_prompt(query, candidates)
+        content, _ = self._llm.chat(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": "Score relevance between 0 and 1."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+        scores = self._parse_scores(content, len(candidates))
+        return tuple(scores)
+
+    def _build_prompt(self, query: Query, candidates: Sequence[DocumentSegment]) -> str:
+        lines = [f"Query ({query.language}): {query.text}", "\nCandidates:"]
+        for idx, candidate in enumerate(candidates, start=1):
+            lines.append(f"[{idx}] ({candidate.language}) {candidate.text}")
+        lines.append("\nProvide scores as JSON array of floats in candidate order.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_scores(content: str, expected: int) -> Sequence[float]:
+        try:
+            m = re.search(r"\[[^\]]+\]", content, flags=re.S)
+            if m:
+                arr = json.loads(m.group(0))
+                if isinstance(arr, list) and len(arr) >= expected:
+                    return [float(arr[i]) for i in range(expected)]
+        except Exception:
+            pass
+        nums = re.findall(r"(?:^|\s)(0(?:\.\d+)?|1(?:\.0+)?)", content)
+        if len(nums) >= expected:
+            return [float(nums[i]) for i in range(expected)]
+        return [0.0] * expected
+
+
+@dataclass
+class StaticConfidenceEstimator(ConfidenceEstimator):
+    confidence: float = 1.0
+
+    def estimate(
+        self, segment: DocumentSegment, target_language: str
+    ) -> ConfidenceEstimate:
+        return ConfidenceEstimate(
+            value=self.confidence, details={"static": self.confidence}, preview=None
+        )
+
+
+def estimate_kappa(
+    source: str, translated: str, back_trans: str | None, slot_consistency: float
+) -> float:
+    ls = len(source) if source else 1
+    lt = len(translated) if translated else 1
+    len_keep = min(lt / ls, ls / lt)
+    len_keep = max(0.0, min(1.0, len_keep))
+    bt = 0.0
+    if back_trans:
+        s = set(source.split())
+        b = set(back_trans.split())
+        u = s | b
+        bt = (len(s & b) / len(u)) if u else 0.0
+    return 0.4 * len_keep + 0.3 * bt + 0.3 * slot_consistency
+
+
+<llm.py>
+import os
+from dataclasses import dataclass
+from typing import Any, Sequence, Tuple
+
+from openai import OpenAI
+
+
+@dataclass
+class LLMUsage:
+    """Accumulates token usage across requests."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+    request_count: int = 0
+
+    def add(self, usage: Any) -> None:
+        """Add usage stats from an OpenAI response."""
+        if usage is None:
+            return
+        self.prompt_tokens += int(getattr(usage, "prompt_tokens", 0) or 0)
+        self.completion_tokens += int(getattr(usage, "completion_tokens", 0) or 0)
+        self.total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
+        self.request_count += 1
+
+    def reset(self) -> None:
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.request_count = 0
+
+
+class LLMClient:
+    """
+    Thin wrapper over OpenAI client that records token usage.
+    Use a single shared instance per experiment run to aggregate usage.
+    """
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self._client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self.usage = LLMUsage()
+
+    def chat(
+        self,
+        messages: Sequence[dict],
+        model: str,
+        **kwargs: Any,
+    ) -> Tuple[str, Any]:
+        """
+        Execute a chat completion.
+
+        Returns (content, raw_response).
+        The wrapper records usage into self.usage.
+        """
+        response = self._client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **kwargs,
+        )
+        self._record_usage(response)
+        content = (response.choices[0].message.content or "").strip()
+        return content, response
+
+    def embed(
+        self,
+        input: str | Sequence[str],
+        model: str = "text-embedding-3-small",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Execute an embeddings call.
+        Returns raw response; usage (if provided by API) is accumulated.
+        """
+        response = self._client.embeddings.create(model=model, input=input, **kwargs)
+        self._record_usage(response)
+        return response
+
+    def _record_usage(self, response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            self.usage.add(usage)
+
+
+def format_usage_summary(usage: LLMUsage) -> dict[str, int]:
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "request_count": usage.request_count,
+    }
+
+
+<metrics.py>
+from __future__ import annotations
+from typing import Iterable, Sequence, Dict
+
+
+def response_language_consistency(
+    tokens: Sequence[str], allowed_tokens: Iterable[str]
+) -> float:
+    allowed = set(allowed_tokens)
+    if not tokens:
+        return 0.0
+    hits = sum(1 for token in tokens if token in allowed)
+    return hits / len(tokens)
+
+
+def response_language_consistency_prob(
+    lang_posteriors: Sequence[Dict[str, float]], target_lang: str, tau: float = 0.7
+) -> float:
+    if not lang_posteriors:
+        return 0.0
+    hits, total = 0, 0
+    for post in lang_posteriors:
+        if post.get("_neutral"):
+            continue
+        total += 1
+        hits += 1 if post.get(target_lang, 0.0) >= tau else 0
+    return hits / total if total else 1.0
+
+
+def cost_normalized_bridging_efficiency(
+    baseline_score: float, bridged_score: float, translation_tokens: float
+) -> float:
+    improvement = bridged_score - baseline_score
+    if translation_tokens <= 0:
+        return 0.0
+    return improvement / translation_tokens
+
+
+<pipeline.py>
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, Protocol, Sequence, Callable
+from .prompting import PromptBuilder
+from .retrieval import HybridRetriever
+from .selection import TranslationCandidate, TranslationSelector
+from .translation import (
+    SimpleSentenceSplitter,
+    SentenceSplitter,
+    Translator,
+    estimate_alignment_quality,
+    greedy_sentence_alignment,
+)
+from .integrations import estimate_kappa
+from .types import EvidenceBlock, Query, RetrievalCandidate, TranslationRequest
+
+PivotFn = Callable[[Sequence[RetrievalCandidate], str], str]
+
+
+class Generator(Protocol):
+    def generate(self, prompt: str) -> str: ...
+
+
+@dataclass
+class WeightingConfig:
+    beta_search: float = 0.6
+    beta_alignment: float = 0.2
+    beta_slots: float = 0.2
+
+    def normalize(self) -> "WeightingConfig":
+        total = self.beta_search + self.beta_alignment + self.beta_slots
+        if total == 0:
+            return WeightingConfig(1.0, 0.0, 0.0)
+        return WeightingConfig(
+            beta_search=self.beta_search / total,
+            beta_alignment=self.beta_alignment / total,
+            beta_slots=self.beta_slots / total,
+        )
+
+
+@dataclass(frozen=True)
+class PipelineOutput:
+    answer: str
+    evidence: Sequence[EvidenceBlock]
+    prompt: str
+
+
+def default_pivot(
+    cands: Sequence[RetrievalCandidate], lq: str, tau: float = 0.6
+) -> str:
+    total = max(len(cands), 1)
+    lq_ratio = sum(1 for c in cands if c.segment.language == lq) / total
+    return lq if lq_ratio >= tau else "en"
+
+
+class LBRAGPipeline:
+    def __init__(
+        self,
+        retriever: HybridRetriever,
+        retriever_alpha: float | None,
+        translator: Translator,
+        generator: Generator,
+        prompt_builder: PromptBuilder,
+        translation_selector: TranslationSelector,
+        weighting: WeightingConfig = WeightingConfig(),
+        sentence_splitter: Optional[SentenceSplitter] = None,
+        pivot_selector: PivotFn = default_pivot,
+    ) -> None:
+        self._retriever = retriever
+        self._alpha = (
+            retriever_alpha if retriever_alpha is not None else retriever._config.alpha
+        )
+        self._translator = translator
+        self._generator = generator
+        self._prompt_builder = prompt_builder
+        self._selector = translation_selector
+        self._weighting = weighting.normalize()
+        self._splitter = sentence_splitter or SimpleSentenceSplitter()
+        self._pivot_selector = pivot_selector
+        self._pivot: str = "en"
+
+    def run(self, query: Query) -> PipelineOutput:
+        candidates = self._retriever.retrieve(query)
+        self._pivot = self._pivot_selector(candidates, query.language)
+        plan = self._selector.select(self._to_translation_candidates(candidates))
+        evidence_blocks = self._build_evidence_blocks(query, candidates, plan.selected)
+        prompt = self._prompt_builder.build(query.text, evidence_blocks, query.language)
+        answer = self._generator.generate(prompt)
+        return PipelineOutput(answer=answer, evidence=evidence_blocks, prompt=prompt)
+
+    def _to_translation_candidates(
+        self, candidates: Sequence[RetrievalCandidate]
+    ) -> Sequence[TranslationCandidate]:
+        translated_candidates = []
+        for candidate in candidates:
+            metadata = candidate.segment.metadata
+            raw_conf = metadata.get("translation_confidence")
+            if raw_conf is not None:
+                confidence = float(raw_conf)
+            else:
+                confidence = self._estimate_confidence(candidate.segment.language)
+            cost = float(
+                metadata.get(
+                    "translation_cost", self._estimate_cost(candidate.segment.text)
+                )
+            )
+            translated_candidates.append(
+                TranslationCandidate(
+                    segment=candidate.segment,
+                    relevance=candidate.final_score(alpha=self._alpha),
+                    confidence=max(0.0, min(1.0, confidence)),
+                    cost=max(cost, 1.0),
+                )
+            )
+        return tuple(translated_candidates)
+
+    def _estimate_cost(self, text: str) -> float:
+        tokens = max(len(text) // 3, 1)
+        return float(tokens)
+
+    def _estimate_confidence(self, lang: str) -> float:
+        if lang == self._pivot:
+            return 1.0
+        if lang == "en" or self._pivot == "en":
+            return 0.9
+        return 0.7
+
+    def _build_evidence_blocks(
+        self,
+        query: Query,
+        candidates: Sequence[RetrievalCandidate],
+        selected: Sequence[TranslationCandidate],
+    ) -> Sequence[EvidenceBlock]:
+        selected_ids = {candidate.segment.identifier for candidate in selected}
+        blocks = []
+        for candidate in candidates:
+            if candidate.segment.identifier in selected_ids:
+                block = self._translate_and_align(candidate)
+            else:
+                block = self._build_untranslated_block(candidate)
+            blocks.append(block)
+        blocks.sort(key=lambda b: b.weight, reverse=True)
+        return tuple(blocks)
+
+    def _translate_and_align(self, candidate: RetrievalCandidate) -> EvidenceBlock:
+        segment = candidate.segment
+        request = TranslationRequest(segment=segment, target_language=self._pivot)
+        result = self._translator.translate(request)
+        source_sentences = self._splitter.split(segment.text)
+        alignments = greedy_sentence_alignment(source_sentences, result.sentences)
+        coverage, slots = estimate_alignment_quality(alignments, len(source_sentences))
+        back_trans = None
+        if hasattr(self._translator, "back_translate"):
+            try:
+                back_trans = self._translator.back_translate(
+                    result.translated_text, segment.language
+                )
+            except Exception:
+                back_trans = None
+        kappa = estimate_kappa(segment.text, result.translated_text, back_trans, slots)
+        weight = self._compute_weight(candidate, coverage, slots)
+        metadata = {
+            "translation_confidence": kappa,
+            "coverage": coverage,
+            "slot_consistency": slots,
+            "kappa": kappa,
+            "token_count": result.metadata.get("token_count"),
+            "used_pivot": self._pivot,
+        }
+        return EvidenceBlock(
+            segment=segment,
+            translated_text=result.translated_text,
+            alignment=alignments,
+            weight=weight,
+            metadata=metadata,
+        )
+
+    def _build_untranslated_block(self, candidate: RetrievalCandidate) -> EvidenceBlock:
+        weight = self._compute_weight(candidate, 0.0, 0.0)
+        return EvidenceBlock(
+            segment=candidate.segment,
+            translated_text=None,
+            alignment=tuple(),
+            weight=weight,
+            metadata={"translation_confidence": 0.0},
+        )
+
+    def _compute_weight(
+        self, candidate: RetrievalCandidate, coverage: float, slots: float
+    ) -> float:
+        w = self._weighting
+        score = candidate.final_score(alpha=self._alpha)
+        return (
+            w.beta_search * score + w.beta_alignment * coverage + w.beta_slots * slots
+        )
+
+
+<prompting.py>
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Iterable, Sequence
+from .types import EvidenceBlock
+
+MAX_EVID_CHARS = 800
+
+
+@dataclass(frozen=True)
+class PromptTemplate:
+    system_instruction: str
+    citation_instruction: str
+    answer_instruction: str
+
+
+class PromptBuilder:
+    def __init__(self, template: PromptTemplate) -> None:
+        self._template = template
+
+    def build(
+        self, question: str, evidence: Sequence[EvidenceBlock], target_language: str
+    ) -> str:
+        header = self._template.system_instruction.format(language=target_language)
+        citation = self._template.citation_instruction
+        body = self._render_evidence(evidence)
+        answer = self._template.answer_instruction.format(language=target_language)
+        return "\n\n".join([header, f"Question: {question}", body, citation, answer])
+
+    def _render_evidence(self, evidence: Sequence[EvidenceBlock]) -> str:
+        lines = ["Evidence (ranked):"]
+        for block in evidence:
+            base = f"[{block.segment.identifier}] ({block.segment.language})"
+            text = (block.translated_text or block.segment.text).strip()
+            if len(text) > MAX_EVID_CHARS:
+                text = text[:MAX_EVID_CHARS] + " ...[truncated]"
+            lines.append(f"- {base}: {text}")
+        return "\n".join(lines)
+
+
+<retrieval.py>
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import List, Mapping, MutableMapping, Optional, Protocol, Sequence
+from .types import DocumentSegment, Query, RetrievalCandidate
+
+
+class Retriever(Protocol):
+    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]: ...
+
+
+class Reranker(Protocol):
+    def score(
+        self, query: Query, candidates: Sequence[DocumentSegment]
+    ) -> Sequence[float]: ...
+
+
+@dataclass
+class RetrievalConfig:
+    alpha: float = 0.5
+    top_k: int = 10
+
+
+class HybridRetriever:
+    def __init__(
+        self,
+        retrievers: Mapping[str, Retriever],
+        reranker: Optional[Reranker] = None,
+        config: RetrievalConfig = RetrievalConfig(),
+    ) -> None:
+        self._retrievers = dict(retrievers)
+        self._reranker = reranker
+        self._config = config
+
+    def retrieve(self, query: Query) -> Sequence[RetrievalCandidate]:
+        merged = self._collect_candidates(query)
+        ranked = self._apply_reranker(query, merged)
+        ranked.sort(key=lambda c: c[1], reverse=True)
+        top = [cand for cand, _ in ranked[: self._config.top_k]]
+        return top
+
+    def _collect_candidates(
+        self, query: Query
+    ) -> MutableMapping[str, RetrievalCandidate]:
+        merged: MutableMapping[str, RetrievalCandidate] = {}
+        for language, retriever in self._retrievers.items():
+            _ = language
+            for candidate in retriever.retrieve(query, self._config.top_k):
+                existing = merged.get(candidate.segment.identifier)
+                if existing is None or candidate.dense_score > existing.dense_score:
+                    merged[candidate.segment.identifier] = candidate
+        return merged
+
+    def _apply_reranker(
+        self, query: Query, merged: Mapping[str, RetrievalCandidate]
+    ) -> List[tuple[RetrievalCandidate, float]]:
+        if not merged:
+            return []
+        candidates = list(merged.values())
+        if self._reranker is None:
+            return [(c, c.final_score(self._config.alpha)) for c in candidates]
+        segments = [c.segment for c in candidates]
+        rerank_scores = self._reranker.score(query, segments)
+        augmented: List[tuple[RetrievalCandidate, float]] = []
+        for candidate, rerank_score in zip(candidates, rerank_scores):
+            enriched = RetrievalCandidate(
+                segment=candidate.segment,
+                dense_score=candidate.dense_score,
+                rerank_score=rerank_score,
+            )
+            augmented.append((enriched, enriched.final_score(self._config.alpha)))
+        return augmented
+
+
+<selection.py>
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Iterable, List, Sequence, Protocol, Any, Optional
+from .types import DocumentSegment
+
+
+@dataclass(frozen=True)
+class ConfidenceEstimate:
+    value: float
+    details: dict[str, Any] = field(default_factory=dict)
+    preview: Optional[str] = None
+
+
+class ConfidenceEstimator(Protocol):
+    def estimate(
+        self, segment: "DocumentSegment", target_language: str
+    ) -> ConfidenceEstimate: ...
+
+
+@dataclass(frozen=True)
+class TranslationCandidate:
+    segment: DocumentSegment
+    relevance: float
+    confidence: float
+    cost: float
+
+    @property
+    def efficiency(self) -> float:
+        if self.cost <= 0:
+            return float("inf")
+        return (self.relevance * self.confidence) / self.cost
+
+
+@dataclass(frozen=True)
+class TranslationPlan:
+    selected: Sequence[TranslationCandidate]
+    skipped: Sequence[TranslationCandidate]
+    budget: float
+    spent: float
+
+
+class TranslationSelector:
+    def __init__(self, budget: float, min_efficiency: float = 1e-6) -> None:
+        self._budget = max(0.0, budget)
+        self._min_eff = min_efficiency
+
+    def select(self, candidates: Iterable[TranslationCandidate]) -> TranslationPlan:
+        pool = sorted(candidates, key=lambda c: c.efficiency, reverse=True)
+        chosen, skipped, remaining = [], [], self._budget
+        for c in pool:
+            if c.efficiency < self._min_eff:
+                skipped.append(c)
+                continue
+            if c.cost <= remaining:
+                chosen.append(c)
+                remaining -= c.cost
+            else:
+                skipped.append(c)
+        for c in sorted(
+            (x for x in skipped if x.cost <= remaining),
+            key=lambda x: x.efficiency,
+            reverse=True,
+        ):
+            chosen.append(c)
+            remaining -= c.cost
+        spent = self._budget - remaining
+        return TranslationPlan(
+            tuple(chosen),
+            tuple([x for x in skipped if x not in chosen]),
+            self._budget,
+            spent,
+        )
+
+
+<translation.py>
+from __future__ import annotations
+import re
+from dataclasses import dataclass
+from typing import Protocol, Sequence
+from .types import SentenceAlignment, TranslationRequest, TranslationResult
+
+
+class Translator(Protocol):
+    def translate(self, request: TranslationRequest) -> TranslationResult: ...
+
+
+class SentenceSplitter(Protocol):
+    def split(self, text: str) -> Sequence[str]: ...
+
+
+class SupportsBackTranslation(Protocol):
+    def back_translate(self, text: str, source_language: str) -> str: ...
+
+
+@dataclass
+class SimpleSentenceSplitter:
+    pattern: re.Pattern[str] = re.compile(r"(?<=[.!?。！？])\s+")
+
+    def split(self, text: str) -> Sequence[str]:
+        parts = [t.strip() for t in self.pattern.split(text) if t.strip()]
+        if not parts:
+            return (text.strip(),) if text.strip() else tuple()
+        return tuple(parts)
+
+
+@dataclass
+class RegexSentenceSplitter:
+    pattern: re.Pattern[str] = re.compile(r"(?<=[。．！？!?]|[.!?])")
+
+    def split(self, text: str) -> Sequence[str]:
+        parts = [t.strip() for t in self.pattern.split(text) if t.strip()]
+        return tuple(parts) if parts else ((text.strip(),) if text.strip() else tuple())
+
+
+def greedy_sentence_alignment(
+    source_sentences: Sequence[str], target_sentences: Sequence[str]
+) -> Sequence[SentenceAlignment]:
+    if not source_sentences or not target_sentences:
+        return tuple()
+    alignments: list[SentenceAlignment] = []
+    target_iter = iter(target_sentences)
+    current_target = next(target_iter, None)
+    for source in source_sentences:
+        if current_target is None:
+            break
+        alignments.append(
+            SentenceAlignment(
+                source_sentence=source,
+                target_sentence=current_target,
+                slot_matches=_extract_slot_matches(source, current_target),
+            )
+        )
+        current_target = next(target_iter, None)
+    return tuple(alignments)
+
+
+def _extract_slot_matches(source: str, target: str) -> dict[str, Sequence[str]]:
+    slots: dict[str, Sequence[str]] = {}
+    patterns = {
+        "numbers": re.findall(r"[-+]?[0-9]+(?:[.,][0-9]+)?", source),
+        "dates": re.findall(r"\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b", source),
+        "upper": re.findall(r"\b[A-Z][A-Za-z0-9_-]+\b", source),
+    }
+    for key, values in patterns.items():
+        if values:
+            target_values = []
+            for value in values:
+                if value in target:
+                    target_values.append(value)
+            slots[key] = tuple(target_values)
+    return slots
+
+
+def estimate_alignment_quality(
+    alignments: Sequence[SentenceAlignment], total_sentences: int
+) -> tuple[float, float]:
+    if total_sentences == 0:
+        return 0.0, 0.0
+    coverage = len(alignments) / total_sentences
+    if not alignments:
+        return coverage, 0.0
+    match_hits = 0
+    match_total = 0
+    for alignment in alignments:
+        for values in alignment.slot_matches.values():
+            match_total += 1
+            if values:
+                match_hits += 1
+    consistency = match_hits / match_total if match_total else 0.0
+    return coverage, consistency
+
+
+<types.py>
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Sequence
+
+
+@dataclass(frozen=True)
+class Query:
+    text: str
+    language: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DocumentSegment:
+    identifier: str
+    text: str
+    language: str
+    score: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def with_score(self, score: float) -> "DocumentSegment":
+        return DocumentSegment(
+            identifier=self.identifier,
+            text=self.text,
+            language=self.language,
+            score=score,
+            metadata=self.metadata,
+        )
+
+
+@dataclass(frozen=True)
+class RetrievalCandidate:
+    segment: DocumentSegment
+    dense_score: float
+    rerank_score: Optional[float]
+
+    def final_score(self, alpha: float) -> float:
+        if self.rerank_score is None:
+            return self.dense_score
+        return alpha * self.dense_score + (1 - alpha) * self.rerank_score
+
+
+@dataclass(frozen=True)
+class TranslationRequest:
+    segment: DocumentSegment
+    target_language: str
+
+
+@dataclass(frozen=True)
+class TranslationResult:
+    translated_text: str
+    confidence: float
+    sentences: Sequence[str]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SentenceAlignment:
+    source_sentence: str
+    target_sentence: str
+    slot_matches: Dict[str, Sequence[str]]
+
+
+@dataclass(frozen=True)
+class EvidenceBlock:
+    segment: DocumentSegment
+    translated_text: Optional[str]
+    alignment: Sequence[SentenceAlignment]
+    weight: float
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+<experiments/scripts/experiment.py>
+import os
+import json
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Sequence
+from datetime import datetime
+import time
+import random
+import math
+from statistics import mean, stdev
+
+
+import matplotlib.pyplot as plt
+
+from lbrag import (
+    Query,
+    DocumentSegment,
+    LBRAGPipeline,
+    WeightingConfig,
+    PromptBuilder,
+    PromptTemplate,
+    PipelineOutput,
+)
+from lbrag.selection import TranslationSelector
+from lbrag.integrations import (
+    OpenAIChatGenerator,
+    OpenAITranslator,
+    OpenAIEmbeddingRetriever,
+    OpenAIListwiseReranker,
+)
+from lbrag.retrieval import HybridRetriever, RetrievalConfig
+from lbrag.types import EvidenceBlock, RetrievalCandidate
+from lbrag.llm import LLMClient, format_usage_summary
+
+import dotenv
+
+dotenv.load_dotenv()
+
+
+@dataclass
+class Sample:
+    id: str
+    question: str
+    question_lang: str
+    answer: str | None
+    quid: int | None = None
+
+
+def load_samples(path: str) -> List[Sample]:
+    print(f"[load_samples] path={path}")
+
+    def to_samples(objs: Sequence[dict]) -> List[Sample]:
+        samples: List[Sample] = []
+        for obj in objs:
+            quid_val = obj.get("quid")
+            try:
+                quid = int(quid_val) if quid_val is not None else None
+            except Exception:
+                quid = None
+            samples.append(
+                Sample(
+                    id=str(obj["id"]),
+                    question=obj["question"],
+                    question_lang=obj["question_lang"],
+                    answer=obj.get("answer"),
+                    quid=quid,
+                )
+            )
+        return samples
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+    raw_stripped = raw.strip()
+    if not raw_stripped:
+        print("[load_samples] empty file")
+        return []
+    try:
+        obj = json.loads(raw_stripped)
+        if isinstance(obj, dict) and "data" in obj:
+            records = obj["data"]
+        elif isinstance(obj, list):
+            records = obj
+        else:
+            records = [obj]
+        samples = to_samples(records)
+        print(f"[load_samples] loaded {len(samples)} samples (JSON array/dict)")
+        return samples
+    except json.JSONDecodeError:
+        samples: List[Sample] = []
+        with open(path, "r", encoding="utf-8") as f2:
+            for line in f2:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                samples.extend(to_samples([obj]))
+        print(f"[load_samples] loaded {len(samples)} samples (JSONL)")
+        return samples
+
+
+@dataclass
+class DirectPipeline:
+    generator: OpenAIChatGenerator
+    template: PromptTemplate
+
+    def run(self, query: Query) -> PipelineOutput:
+        system_instruction = self.template.system_instruction.format(
+            language=query.language
+        )
+        answer_instruction = self.template.answer_instruction.format(
+            language=query.language
+        )
+        prompt_parts = [
+            system_instruction,
+            f"Question: {query.text}",
+            "Evidence (ranked):",
+            "- [NONE] No external documents are available.",          self.template.citation_instruction,
+            answer_instruction,
+        ]
+        prompt = "\n\n".join(prompt_parts)
+        answer = self.generator.generate(prompt)
+        return PipelineOutput(answer=answer, evidence=tuple(), prompt=prompt)
+
+
+@dataclass
+class OpenAISemanticJudge:
+    model: str = "gpt-4o"
+    api_key: str | None = None
+    llm_client: LLMClient | None = None
+
+    def __post_init__(self) -> None:
+        self._llm = self.llm_client or LLMClient(api_key=self.api_key)
+
+    def score(
+        self,
+        question: str,
+        gold_answer: str,
+        pred_answer: str,
+        target_lang: str,
+    ) -> float:
+        if not gold_answer.strip():
+            return 0.0
+        if not pred_answer.strip():
+            return 0.0
+
+        system_msg = (
+            "You are a strict but fair evaluation assistant. "
+            "Given a question, a gold reference answer, and a model's predicted answer, "
+            "you judge how semantically equivalent the predicted answer is to the gold answer. "
+            "You only care about factual content relevant to the question, not style or wording. "
+            "Return a JSON object with fields 'score' (0.0 to 1.0) and 'explanation' (short text)."
+        )
+
+        user_msg = f"""
+[Question] (language: {target_lang})
+{question}
+
+[Gold Answer]
+{gold_answer}
+
+[Predicted Answer]
+{pred_answer}
+
+Please evaluate how semantically equivalent the predicted answer is to the gold answer,
+on a scale from 0.0 (completely wrong or unrelated) to 1.0 (fully correct and equivalent).
+
+Guidelines:
+- Small wording differences or rephrasings should still get a high score.
+- Numeric answers with the same value but different units formatting (e.g. "4429m" vs "4429 メートル") should be treated as equivalent.
+- If the predicted answer misses key parts of the gold answer, lower the score.
+- If the predicted answer contradicts the gold answer, score near 0.
+- Only consider content needed to answer the question.
+
+Respond ONLY with a JSON object like:
+{{"score": 0.94, "explanation": "..."}}.
+        """.strip()
+
+        try:
+            content, _ = self._llm.chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+            )
+        except Exception:
+            return 0.0
+
+        try:
+            m = re.search(r"\{.*\}", content, flags=re.S)
+            if not m:
+                return 0.0
+            obj = json.loads(m.group(0))
+            score = float(obj.get("score", 0.0))
+            if score < 0.0:
+                score = 0.0
+            if score > 1.0:
+                score = 1.0
+            return score
+        except Exception:
+            return 0.0
+
+
+def build_prompt_builder() -> PromptBuilder:
+    template = PromptTemplate(
+        system_instruction=(
+            "You are a careful multilingual assistant. "
+            "Always answer in {language} only. "
+            "Do not mix other languages. "
+            "Based on the evidence provided, give your best answer. "
+        ),
+        citation_instruction=(
+            "Do NOT include any citations, IDs, brackets like [..], or evidence markers in your final answer."
+        ),
+        answer_instruction="Answer only with a short answer in {language}, without explanation.",
+    )
+    return PromptBuilder(template)
+
+
+def samples_to_documents(samples: Sequence[Sample]) -> List[DocumentSegment]:
+    print(f"[samples_to_documents] building {len(samples)} documents")
+    docs: List[DocumentSegment] = []
+    for s in samples:
+        ans = s.answer or ""
+        text = s.question + "\n\n" + ans
+        docs.append(
+            DocumentSegment(
+                identifier=s.id,
+                text=text,
+                language=s.question_lang,
+                metadata={"source": "mkqa"},
+            )
+        )
+    return docs
+
+
+@dataclass
+class ExcludeSameLanguageRetriever:
+    base: OpenAIEmbeddingRetriever
+    exclude_same_language: bool | float = True
+
+    def retrieve(self, query: Query, top_k: int) -> Sequence[RetrievalCandidate]:
+        should_exclude = self.exclude_same_language
+        if isinstance(self.exclude_same_language, float):
+            should_exclude = random.random() < self.exclude_same_language
+        if not should_exclude:
+            return self.base.retrieve(query, top_k)
+        total = len(self.base.documents)
+        if total <= 0 or top_k <= 0:
+            return tuple()
+        target = min(top_k, total)
+        seen: set[str] = set()
+        out: list[RetrievalCandidate] = []
+        k = min(total, max(1, target))
+        while True:
+            candidates = self.base.retrieve(query, k)
+            for c in candidates:
+                cid = c.segment.identifier
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                if c.segment.language == query.language:
+                    continue
+                out.append(c)
+                if len(out) >= target:
+                    return tuple(out)
+            if len(seen) >= total or k >= total:
+                break
+            k = min(total, max(k + target, k * 2))
+        return tuple(out)
+
+
+def build_systems(samples: Sequence[Sample], llm_client: LLMClient, data_dir: str) -> Dict[str, object]:
+    print("[build_systems] start")
+    docs = samples_to_documents(samples)
+    print("[build_systems] creating OpenAIEmbeddingRetriever (embedding all docs)...")
+    base_retriever = OpenAIEmbeddingRetriever(
+        documents=docs, exclude_same_language=False, llm_client=llm_client, cache_dir=data_dir
+    )
+    print("[build_systems] embeddings ready")
+    print("[build_systems] creating reranker...")
+    reranker = OpenAIListwiseReranker(llm_client=llm_client)
+    retriever = ExcludeSameLanguageRetriever(base=base_retriever, exclude_same_language=True)
+    hybrid = HybridRetriever(
+        retrievers={"mkqa": retriever},
+        reranker=reranker,
+        config=RetrievalConfig(alpha=0.5, top_k=10),
+    )
+    translator = OpenAITranslator(llm_client=llm_client)
+    generator = OpenAIChatGenerator(llm_client=llm_client)
+    builder = build_prompt_builder()
+    wcfg = WeightingConfig(0.6, 0.2, 0.2)
+    selector_multi = TranslationSelector(budget=0.0)
+    selector_full = TranslationSelector(budget=1e9)
+    selector_lbrag = TranslationSelector(budget=35.0)
+
+    def always_en_pivot(cands, lq: str) -> str:
+        return "en"
+
+    direct = DirectPipeline(generator=generator, template=builder._template)
+
+    multi = LBRAGPipeline(
+        retriever=hybrid,
+        retriever_alpha=None,
+        translator=translator,
+        generator=generator,
+        prompt_builder=builder,
+        translation_selector=selector_multi,
+        weighting=wcfg,
+    )
+
+    cross = LBRAGPipeline(
+        retriever=hybrid,
+        retriever_alpha=None,
+        translator=translator,
+        generator=generator,
+        prompt_builder=builder,
+        translation_selector=selector_full,
+        weighting=wcfg,
+        pivot_selector=always_en_pivot,
+    )
+
+    lbrag = LBRAGPipeline(
+        retriever=hybrid,
+        retriever_alpha=None,
+        translator=translator,
+        generator=generator,
+        prompt_builder=builder,
+        translation_selector=selector_lbrag,
+        weighting=wcfg,
+    )
+
+    systems = {
+        "direct": direct,
+        "multi": multi,
+        "cross": cross,
+        "lbrag": lbrag,
+    }
+    print(f"[build_systems] done, systems={list(systems.keys())}")
+    return systems
+
+
+def normalize_text(s: str) -> str:
+    s = s.lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    pattern = r"[^" \
+              r"0-9" \
+              r"a-z\u00c0-\u024f" \
+              r"\u0400-\u04ff" \
+              r"\u0590-\u05ff" \
+              r"\u0600-\u06ff\ufb50-\ufdff\ufe70-\ufeff" \
+              r"\u0e00-\u0e7f" \
+              r"\u1100-\u11ff\uac00-\ud7af" \
+              r"\u3040-\u309f\u30a0-\u30ff" \
+              r"\u4e00-\u9fff" \
+              r"]+"
+    s = re.sub(pattern, " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def f1_score_lang(pred: str, gold: str, lang: str) -> float:
+    pred_norm = normalize_text(pred)
+    gold_norm = normalize_text(gold)
+    if not pred_norm and not gold_norm:
+        return 1.0
+    if not pred_norm or not gold_norm:
+        return 0.0
+    if lang in ("ja", "zh", "zh_cn", "zh_tw"):
+        p_tokens = list(pred_norm.replace(" ", ""))
+        g_tokens = list(gold_norm.replace(" ", ""))
+    else:
+        p_tokens = pred_norm.split()
+        g_tokens = gold_norm.split()
+    if not p_tokens and not g_tokens:
+        return 1.0
+    if not p_tokens or not g_tokens:
+        return 0.0
+    counts: Dict[str, int] = {}
+    for t in g_tokens:
+        counts[t] = counts.get(t, 0) + 1
+    overlap = 0
+    for t in p_tokens:
+        c = counts.get(t, 0)
+        if c > 0:
+            overlap += 1
+            counts[t] = c - 1
+    if overlap == 0:
+        return 0.0
+    precision = overlap / len(p_tokens)
+    recall = overlap / len(g_tokens)
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def exact_match(pred: str, gold: str) -> float:
+    return 1.0 if normalize_text(pred) == normalize_text(gold) else 0.0
+
+
+def compute_rlc(text: str, lang: str) -> float:
+    total = 0
+    hits = 0
+    for ch in text:
+        if ch.isspace():
+            continue
+        if ch.isdigit():
+            continue
+        if ch in ".,!?;:()[]{}-–—'\"/":
+            continue
+        total += 1
+        if lang.startswith("ja"):
+            if ("\u3040" <= ch <= "\u309f") or ("\u30a0" <= ch <= "\u30ff") or ("\u4e00" <= ch <= "\u9fff"):
+                hits += 1
+        elif lang.startswith("zh"):
+            if "\u4e00" <= ch <= "\u9fff":
+                hits += 1
+        elif lang in ("en", "de", "es", "fr", "it", "pt"):
+            if ch.isalpha():
+                hits += 1
+        else:
+            if ch.isalpha() or ("\u4e00" <= ch <= "\u9fff") or ("\u3040" <= ch <= "\u30ff"):
+                hits += 1
+    if total == 0:
+        return 1.0
+    return hits / total
+
+
+def rlc_binary(text: str, lang: str, threshold: float = 0.6) -> float:
+    score = compute_rlc(text, lang)
+    return 1.0 if score >= threshold else 0.0
+
+
+def total_translation_tokens(evidence: Sequence[EvidenceBlock]) -> float:
+    total = 0.0
+    for block in evidence:
+        v = evidence_block_token_count(block)
+        if v is None:
+            continue
+        try:
+            total += float(v)
+        except Exception:
+            continue
+    return total
+
+
+def evidence_block_token_count(block: EvidenceBlock):
+    if block.metadata is None:
+        return None
+    return block.metadata.get("token_count")
+
+
+def ensure_dirs(base_dir: str) -> Dict[str, str]:
+    answers_dir = os.path.join(base_dir, "answers")
+    metrics_dir = os.path.join(base_dir, "metrics")
+    figures_dir = os.path.join(base_dir, "figures")
+    os.makedirs(answers_dir, exist_ok=True)
+    os.makedirs(metrics_dir, exist_ok=True)
+    os.makedirs(figures_dir, exist_ok=True)
+    return {
+        "answers": answers_dir,
+        "metrics": metrics_dir,
+        "figures": figures_dir,
+    }
+
+
+def plot_metrics(metrics: Dict[str, Dict[str, float]], figures_dir: str, run_id: str):
+    systems = ["direct", "multi", "cross", "lbrag"]
+    systems = [s for s in systems if s in metrics]
+
+    f1_vals = [metrics[s]["f1"] for s in systems]
+    em_vals = [metrics[s]["em"] for s in systems]
+    rlc_vals = [metrics[s]["rlc"] for s in systems]
+    cost_vals = [metrics[s]["cost"] for s in systems]
+    cnbe_vals = [metrics[s]["cnbe"] for s in systems]
+    semantic_score_vals = [metrics[s]["semantic_score"] for s in systems]
+    
+    f1_stds = [metrics[s].get("f1_std", 0) for s in systems]
+    em_stds = [metrics[s].get("em_std", 0) for s in systems]
+    rlc_stds = [metrics[s].get("rlc_std", 0) for s in systems]
+    cost_stds = [metrics[s].get("cost_std", 0) for s in systems]
+    cnbe_stds = [metrics[s].get("cnbe_std", 0) for s in systems]
+    semantic_score_stds = [metrics[s].get("semantic_score_std", 0) for s in systems]
+
+    plt.style.use("ggplot")
+    x = range(len(systems))
+    width = 0.4
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar([i - width/2 for i in x], em_vals, width, yerr=em_stds, 
+           label="EM", capsize=5, alpha=0.8)
+    ax.bar([i + width/2 for i in x], f1_vals, width, yerr=f1_stds, 
+           label="F1", capsize=5, alpha=0.8)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(systems)
+    ax.set_ylabel("Score")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"EM / F1 by system ({run_id})")
+    ax.legend()
+    for i, (v, std) in enumerate(zip(em_vals, em_stds)):
+        ax.text(i - width/2, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    for i, (v, std) in enumerate(zip(f1_vals, f1_stds)):
+        ax.text(i + width/2, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_em_f1.png"), dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x, rlc_vals, yerr=rlc_stds, capsize=5, alpha=0.8)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(systems)
+    ax.set_ylabel("RLC")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"Response Language Consistency ({run_id})")
+    for i, (v, std) in enumerate(zip(rlc_vals, rlc_stds)):
+        ax.text(i, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_rlc.png"), dpi=150)
+    plt.close(fig)
+
+    fig, ax1 = plt.subplots(figsize=(8, 5))
+    ax1.bar(x, cost_vals, yerr=cost_stds, capsize=5, alpha=0.8, 
+            label="Avg translation tokens", color='skyblue')
+    ax1.set_xticks(list(x))
+    ax1.set_xticklabels(systems)
+    ax1.set_ylabel("Avg translation tokens")
+    ax1.set_title(f"Translation cost & CNBE ({run_id})")
+
+    ax2 = ax1.twinx()
+    ax2.errorbar(list(x), cnbe_vals, yerr=cnbe_stds, marker="o", 
+                 label="CNBE", capsize=5, color='orange', linewidth=2)
+    ax2.set_ylabel("CNBE")
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_cost_cnbe.png"), dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x, semantic_score_vals, yerr=semantic_score_stds, capsize=5, alpha=0.8)
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(systems)
+    ax.set_ylabel("Semantic Agreement Score (SAS)")
+    ax.set_ylim(0.0, 1.05)
+    ax.set_title(f"LLM-based Semantic Agreement ({run_id})")
+    for i, (v, std) in enumerate(zip(semantic_score_vals, semantic_score_stds)):
+        ax.text(i, v + std + 0.02, f"{v:.2f}", ha="center", va="bottom", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(figures_dir, f"{run_id}_semantic.png"), dpi=150)
+    plt.close(fig)
+
+
+def select_samples_by_quid(
+    samples: Sequence[Sample],
+    max_samples: int | None = None,
+    seed: int = 42,
+) -> List[Sample]:
+    rng = random.Random(seed)
+    groups: Dict[int | str, List[Sample]] = {}
+    order: List[int | str] = []
+
+    for s in samples:
+        if s.quid is not None:
+            key: int | str = s.quid
+        else:
+            key = s.id.rsplit("_", 1)[0]
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(s)
+
+    total_quids = len(order)
+    if max_samples is None:
+        target = total_quids
+    else:
+        target = min(max_samples, total_quids)
+
+    rng.shuffle(order)
+    
+    selected: List[Sample] = []
+    for key in order[:target]:
+        cand_group = groups[key]
+        choice = rng.choice(cand_group)
+        selected.append(choice)
+
+    if max_samples is not None and max_samples > total_quids:
+        print(
+            f"[select_samples_by_quid] requested max_samples={max_samples}, "
+            f"but only {total_quids} quids available; using {total_quids}."
+        )
+
+    print(
+        f"[select_samples_by_quid] selected {len(selected)} samples "
+        f"from {total_quids} quids"
+    )
+    return selected
+
+
+def run_experiment(data_path: str, num_test_queries: int | None = None) -> None:
+    print("[run_experiment] start")
+    start_time = datetime.now()
+    answer_rows: List[dict] = []
+    llm_client = LLMClient()
+
+    all_samples = load_samples(data_path)
+    print(f"[run_experiment] loaded {len(all_samples)} samples as knowledge base")
+    
+    data_dir = os.path.dirname(data_path)
+    systems = build_systems(all_samples, llm_client=llm_client, data_dir=data_dir)
+    
+    test_queries = select_samples_by_quid(all_samples, max_samples=num_test_queries, seed=42)
+    if num_test_queries is not None:
+        test_queries = test_queries[:num_test_queries]
+        print(f"[run_experiment] selected {len(test_queries)} test queries")
+    else:
+        print(f"[run_experiment] using all {len(test_queries)} samples as test queries")
+    semantic_judge = OpenAISemanticJudge(llm_client=llm_client)
+    agg: Dict[str, Dict[str, float]] = {}
+    for name in systems:
+        agg[name] = {
+            "em": 0.0,
+            "f1": 0.0,
+            "rlc": 0.0,
+            "rlc_ok": 0.0,
+            "cost": 0.0,
+            "semantic_score": 0.0,
+            "n": 0.0,
+        }
+    per_sample: Dict[str, Dict[str, List[float]]] = {}
+    for name in systems:
+        per_sample[name] = {
+            "em": [],
+            "f1": [],
+            "rlc": [],
+            "rlc_ok": [],
+            "cost": [],
+            "semantic_score": [],
+        }
+
+    total_queries = len(test_queries)
+    for idx, s in enumerate(test_queries, start=1):
+        print(f"[run_experiment] test query {idx}/{total_queries} id={s.id} lang={s.question_lang}")
+        gold_text = s.answer or ""
+        q = Query(text=s.question, language=s.question_lang, metadata={"id": s.id})
+        for name, pipe in systems.items():
+            print(f"  [system:{name}] running...", end="", flush=True)
+            out: PipelineOutput = pipe.run(q)  # type: ignore
+            ans = out.answer or ""
+            print(f" retrieved {len(out.evidence)} evidence blocks", end="", flush=True)
+            em = exact_match(ans, gold_text)
+            f1 = f1_score_lang(ans, gold_text, s.question_lang)
+            rlc = compute_rlc(ans, s.question_lang)
+            rlc_ok = rlc_binary(ans, s.question_lang)
+            cost = total_translation_tokens(out.evidence)
+            semantic_score = semantic_judge.score(s.question, gold_text, ans, s.question_lang)
+            agg[name]["em"] += em
+            agg[name]["f1"] += f1
+            agg[name]["rlc"] += rlc
+            agg[name]["rlc_ok"] += rlc_ok
+            agg[name]["cost"] += cost
+            agg[name]["n"] += 1.0
+            agg[name]["semantic_score"] += semantic_score
+            per_sample[name]["em"].append(em)
+            per_sample[name]["f1"].append(f1)
+            per_sample[name]["rlc"].append(rlc)
+            per_sample[name]["rlc_ok"].append(rlc_ok)
+            per_sample[name]["cost"].append(cost)
+            per_sample[name]["semantic_score"].append(semantic_score)
+            evidence_list = []
+            for ev_block in out.evidence:
+                ev_info = {
+                    "id": ev_block.segment.identifier,
+                    "language": ev_block.segment.language,
+                    "original_text": ev_block.segment.text[:200] + "..." if len(ev_block.segment.text) > 200 else ev_block.segment.text,
+                    "translated_text": (ev_block.translated_text[:200] + "..." if ev_block.translated_text and len(ev_block.translated_text) > 200 else ev_block.translated_text) if ev_block.translated_text else None,
+                    "weight": ev_block.weight,
+                    "metadata": ev_block.metadata,
+                }
+                evidence_list.append(ev_info)
+            
+            answer_rows.append(
+                {
+                    "sample_id": s.id,
+                    "sample_lang": s.question_lang,
+                    "system": name,
+                    "question": s.question,
+                    "gold_answer": gold_text,
+                    "pred_answer": ans,
+                    "em": em,
+                    "f1": f1,
+                    "rlc": rlc,
+                    "rlc_ok": rlc_ok,
+                    "translate_tokens": cost,
+                    "semantic_score": semantic_score,
+                    "num_evidence": len(out.evidence),
+                    "evidence": evidence_list,
+                    "prompt": out.prompt,
+                }
+            )
+            print(" done")
+
+    for name in systems:
+        if name == "direct":
+            continue
+        
+        cnbe_list: List[float] = []
+        for i in range(len(per_sample[name]["f1"])):
+            f1_rag = per_sample[name]["f1"][i]
+            f1_baseline = per_sample["direct"]["f1"][i]
+            cost_i = per_sample[name]["cost"][i]
+            
+            if cost_i and cost_i > 0.0:
+                # CNBE = (F1_improvement) / cost
+                cnbe_list.append((f1_rag - f1_baseline) / cost_i)
+            else:
+                cnbe_list.append(0.0)
+        
+        per_sample[name]["cnbe"] = cnbe_list
+    
+    per_sample["direct"]["cnbe"] = [0.0] * len(per_sample["direct"]["f1"])
+    
+    def _mean_std(xs: List[float]) -> tuple[float, float]:
+        if not xs:
+            return 0.0, 0.0
+        if len(xs) < 2:
+            return float(xs[0]), 0.0
+        return float(mean(xs)), float(stdev(xs))
+    
+    print("\n" + "="*100)
+    print("Experiment Results Summary")
+    print("="*100)
+    
+    metrics_out: Dict[str, Dict[str, float]] = {}
+    for name in systems:
+        n = float(len(per_sample[name]["f1"])) if name in per_sample else max(agg[name]["n"], 1.0)
+
+        em_mean, em_std = _mean_std(per_sample[name]["em"])
+        f1_mean, f1_std = _mean_std(per_sample[name]["f1"])
+        rlc_mean, rlc_std = _mean_std(per_sample[name]["rlc"])
+        rlc_ok_mean, rlc_ok_std = _mean_std(per_sample[name]["rlc_ok"])
+        cost_mean, cost_std = _mean_std(per_sample[name]["cost"])
+        sem_mean, sem_std = _mean_std(per_sample[name]["semantic_score"])
+        cnbe_mean, cnbe_std = _mean_std(per_sample[name]["cnbe"])
+
+        metrics_out[name] = {
+            "em": em_mean,
+            "em_std": em_std,
+            "f1": f1_mean,
+            "f1_std": f1_std,
+            "rlc": rlc_mean,
+            "rlc_std": rlc_std,
+            "rlc_ok": rlc_ok_mean,
+            "rlc_ok_std": rlc_ok_std,
+            "cost": cost_mean,
+            "cost_std": cost_std,
+            "cnbe": cnbe_mean,
+            "cnbe_std": cnbe_std,
+            "semantic_score": sem_mean,
+            "semantic_score_std": sem_std,
+            "n": n,
+        }
+
+        print(
+            f"{name:8s} | "
+            f"EM={em_mean:.3f}±{em_std:.3f} | "
+            f"F1={f1_mean:.3f}±{f1_std:.3f} | "
+            f"RLC={rlc_mean:.3f}±{rlc_std:.3f} | "
+            f"Cost={cost_mean:.1f}±{cost_std:.1f} | "
+            f"CNBE={cnbe_mean:.5f}±{cnbe_std:.5f} | "
+            f"Sem={sem_mean:.3f}±{sem_std:.3f}"
+        )
+    print("="*100 + "\n")
+
+    baseline_f1 = 0.0
+    if "direct" in per_sample and per_sample["direct"]["f1"]:
+        baseline_f1 = float(mean(per_sample["direct"]["f1"]))
+    
+    end_time = datetime.now()
+    run_id = end_time.strftime("%Y%m%d_%H%M")
+    base_dir = os.path.join("experiments", "results", run_id)
+    dirs = ensure_dirs(base_dir)
+    answers_path = os.path.join(dirs["answers"], f"{run_id}_answers.jsonl")
+    metrics_path = os.path.join(dirs["metrics"], f"{run_id}_metrics.json")
+    
+    print("=== Experiment E1 Results ===")
+    print(f"Run ID: {run_id}")
+    print(f"Results dir: {base_dir}")
+    print(f"Data: {data_path}")
+    print(f"Baseline (for CNBE): direct (no-RAG), F1={baseline_f1:.3f}")
+    print("")
+
+    
+    meta = {
+        "run_id": run_id,
+        "data_path": data_path,
+        "knowledge_base_size": len(all_samples),
+        "num_test_queries": num_test_queries,
+        "actual_test_queries": len(test_queries),
+        "baseline_f1": baseline_f1,
+        "metrics": metrics_out,
+        "started_at": start_time.isoformat(),
+        "finished_at": end_time.isoformat(),
+        "llm_usage": format_usage_summary(llm_client.usage),
+    }
+    
+    with open(answers_path, "w", encoding="utf-8") as fout:
+        for row in answer_rows:
+            out_row = {"run_id": run_id, **row}
+            fout.write(json.dumps(out_row, ensure_ascii=False) + "\n")
+    
+    with open(metrics_path, "w", encoding="utf-8") as fmeta:
+        json.dump(meta, fmeta, ensure_ascii=False, indent=2)
+
+    plot_metrics(metrics_out, dirs["figures"], run_id)
+    print(f"[run_experiment] answers saved to {answers_path}")
+    print(f"[run_experiment] metrics saved to {metrics_path}")
+    print(f"[run_experiment] figures saved to {dirs['figures']}")
+    print(f"[run_experiment] LLM usage summary: {format_usage_summary(llm_client.usage)}")
+
+
+if __name__ == "__main__":
+    start_time = time.time()
+    path = "experiments/data/20251208_1/mkqa_samples.json"
+    num_test_queries = 100
+    run_experiment(path, num_test_queries=num_test_queries)
+    end_time = time.time()
+    print(f"Test queries: {num_test_queries}, Time taken: {end_time - start_time} seconds")
+
+
+<experiments/scripts/prepare_mkqa_samples.py>
+from __future__ import annotations
+import json
+from pathlib import Path
+from typing import List, Dict, Sequence
+from datetime import datetime
+import time
+
+from datasets import load_dataset
+
+MKQA_URL = "https://github.com/apple/ml-mkqa/raw/main/dataset/mkqa.jsonl.gz"
+
+
+def build_mkqa_samples(
+    split: str = "train",
+    langs: List[str] | None = None,
+    max_quid: int | None = None,
+) -> List[Dict]:
+    if langs is None:
+        langs = ["en", "ja", "de", "es", "zh_cn"]
+
+    print("Loading MKQA jsonl from GitHub (no remote code)...")
+    ds = load_dataset(
+        "json",
+        data_files={"train": MKQA_URL},
+        split=split,
+    )
+
+    samples: List[Dict] = []
+    exid_to_quid: Dict[str, int] = {}
+    next_quid = 1
+
+    for ex in ds:
+        ex_id = str(ex.get("example_id", ""))
+        if not ex_id:
+            continue
+
+        queries = ex["queries"]
+        answers = ex["answers"]
+
+        available_langs = []
+        for lang in langs:
+            q = queries.get(lang)
+            ans_list = answers.get(lang)
+            if q and ans_list:
+                available_langs.append(lang)
+
+        if not available_langs:
+            continue
+
+        if ex_id not in exid_to_quid:
+            if max_quid is not None and len(exid_to_quid) >= max_quid:
+                break
+            exid_to_quid[ex_id] = next_quid
+            next_quid += 1
+        quid = exid_to_quid[ex_id]
+
+        for lang in available_langs:
+            q = queries[lang]
+            ans_list = answers[lang]
+
+            first_answer = ans_list[0]
+            gold_text = first_answer.get("text", "")
+
+            sample = {
+                "id": f"mkqa_{ex_id}_{lang}",
+                "quid": quid,
+                "question": q,
+                "question_lang": lang,
+                "answer": gold_text,
+            }
+            samples.append(sample)
+
+    print(f"Total unique quids (semantic questions): {len(exid_to_quid)}")
+    print(f"Total samples: {len(samples)}")
+    return samples
+
+
+def summarize_dataset(
+    samples: Sequence[Dict],
+    langs: Sequence[str],
+    repo_path: Path,
+) -> None:
+    quid_to_langs: Dict[int, set] = {}
+    lang_to_quids: Dict[str, set] = {lang: set() for lang in langs}
+
+    for s in samples:
+        quid = int(s.get("quid", -1))
+        lang = s.get("question_lang")
+        if quid < 0 or lang is None:
+            continue
+        if quid not in quid_to_langs:
+            quid_to_langs[quid] = set()
+        quid_to_langs[quid].add(lang)
+        if lang in lang_to_quids:
+            lang_to_quids[lang].add(quid)
+        else:
+            lang_to_quids[lang] = {quid}
+
+    total_quids = len(quid_to_langs)
+
+    coverage_counts: Dict[int, int] = {}
+    for _, langset in quid_to_langs.items():
+        k = len(langset)
+        coverage_counts[k] = coverage_counts.get(k, 0) + 1
+
+    lines: List[str] = []
+    lines.append(f"Total unique semantic questions (quids): {total_quids}")
+    lines.append("")
+    lines.append("Language coverage distribution per question:")
+    for k in sorted(coverage_counts.keys(), reverse=True):
+        v = coverage_counts[k]
+        lines.append(f"  {k} languages: {v}")
+    lines.append("")
+    lines.append("Per-language question counts:")
+    for lang in langs:
+        cnt = len(lang_to_quids.get(lang, set()))
+        lines.append(f"  {lang}: {cnt}")
+
+    repo_path.parent.mkdir(parents=True, exist_ok=True)
+    with repo_path.open("w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    print(f"Dataset summary written to {repo_path}")
+
+
+def main():
+    langs = [
+        "ar",
+        "de",
+        "en",
+        "es",
+        "fi",
+        "fr",
+        "he",
+        "it",
+        "ja",
+        "ko",
+        "ms",
+        "nl",
+        "no",
+        "pl",
+        "pt",
+        "ru",
+        "sv",
+        "th",
+        "tr",
+        "vi",
+        "zh_cn",
+    ]
+
+    max_quid = 10000
+
+    start_time = time.time()
+
+    samples = build_mkqa_samples(
+        split="train",
+        langs=langs,
+        max_quid=max_quid,
+    )
+    end_time = time.time()
+
+    base_data_dir = Path(__file__).resolve().parent.parent / "data"
+    base_data_dir.mkdir(parents=True, exist_ok=True)
+
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    run_idx = 1
+    while True:
+        run_dir = base_data_dir / f"{date_str}_{run_idx}"
+        if not run_dir.exists():
+            break
+        run_idx += 1
+
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    output_path = run_dir / "mkqa_samples.json"
+    print(f"Saving {len(samples)} samples to {output_path} ...")
+    with output_path.open("w", encoding="utf-8") as f:
+        json.dump(samples, f, ensure_ascii=False, indent=2)
+    print("Done.")
+
+    repo_path = run_dir / "dataset_repo.txt"
+    summarize_dataset(samples, langs, repo_path)
+    print(
+        f"Taken {end_time - start_time} seconds for building {max_quid} MKQA samples(24 languages)"
+    )
+
+
+if __name__ == "__main__":
+    main()
