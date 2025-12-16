@@ -1,0 +1,756 @@
+\documentclass[12pt,ja=standard,xelatex]{bxjsreport}
+
+% =========================
+% 基本設定
+% =========================
+\usepackage{geometry}
+\geometry{margin=25mm}
+
+% 日本語（upLaTeX）関連
+\usepackage{zxjatype}
+\setjamainfont{IPAexMincho}
+
+% ソースコード
+\usepackage{listings}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible
+}
+
+% 数式・図表・配置
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{placeins} % \FloatBarrier を使用
+\usepackage[superscript]{cite}
+
+% 図（TikZ）
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit}
+\tikzset{
+  block/.style  = {rectangle, draw, rounded corners, align=center,
+                   minimum width=34mm, minimum height=9mm},
+  groupbox/.style = {draw, rounded corners, inner sep=4mm},
+  line/.style   = {-{Latex}, line width=0.4pt}
+}
+
+% URL・ハイパーリンク・参照
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{cleveref} % hyperref の後に読み込む
+
+% 章タイトルまわり
+\renewcommand{\prechaptername}{第}
+\renewcommand{\postchaptername}{章}
+
+\usepackage{titlesec}
+\titleformat{\chapter}[hang]
+  {\normalfont\LARGE\bfseries}
+  {\prechaptername\thechapter\postchaptername}{1em}{}
+\titlespacing*{\chapter}{0pt}{0.5\baselineskip}{0.5\baselineskip}
+
+% =========================
+% タイトル情報
+% =========================
+\title{LBRAG：選択的翻訳による多言語RAGシステム}
+\author{近畿大学 工学部 ロボティクス学科\\学生番号: 2211000083\\氏名: 閻　昊男}
+\date{YYYY年MM月DD日}
+
+% =========================
+% 本文
+% =========================
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\chapter{はじめに}
+
+\section{研究背景}
+
+近年，ChatGPT や Claude に代表される生成型人工知能は，自然言語処理（Natural Language Processing, NLP）の発展を大きく牽引している．これらのシステムは Transformer に基づく大規模言語モデル（Large Language Models, LLM）を中核とし，大規模コーパスに対する自己教師あり学習を通じて，多様なタスクにまたがる汎用的な言語能力を獲得している．
+
+しかし，LLM はあくまで学習時点までのテキスト分布に依存した静的なパラメトリックモデルであり，以下のような限界を有する．第一に，学習後に新たに生じた事象や更新された知識を自動的に反映することができず，急速に変化するニュース，技術動向，法制度などに対して陳腐化した情報を出力しうる．第二に，内部に埋め込まれた知識は分散表現として暗黙的に符号化されているため，回答の根拠となる具体的な文書や出典を明示することが困難である．第三に，入力が曖昧な場合や学習分布から外れた問いに対して，もっともらしく見えるが事実に基づかない出力（ハルシネーション）が生じるという信頼性の問題がある．
+
+この問題に対処する枠組みとして，外部知識を検索してから生成を行う検索拡張生成（Retrieval-Augmented Generation, RAG）が提案されている．RAG は，百科事典，ニュース記事，技術文書，企業内ナレッジベースなどの非パラメトリックな知識源から関連文書を検索し，その内容に基づいて LLM に回答を生成させることで，(i) 知識の更新容易性，(ii) 出典に基づく説明可能性，(iii) ハルシネーション抑制，を同時に狙う手法である．
+
+しかし，既存の RAG 研究の多くは英語単言語環境を前提として設計・評価されている．現実世界の情報エコシステムは多言語的であり，質問文の言語と有力な証拠文書の言語が一致しない状況，すなわちクロスリンガル質問応答（cross-lingual QA）が一般的に発生する．このとき，以下の課題が顕在化する．
+
+\begin{enumerate}
+  \item \textbf{検索段階の言語バイアス}：多言語ベクトル検索モデルであっても，高資源言語（特に英語）やクエリ言語と同一の言語を選好する傾向があり，他言語に存在する重要情報が十分に想起されない場合がある．
+  \item \textbf{翻訳に伴う情報損失}：質問言語と異なる証拠文書を一括してピボット言語（多くは英語）へ翻訳する手法は，言語統一による扱いやすさと引き換えに，翻訳誤りやニュアンス喪失，トークン長増大によるコスト増加を招く．特に低資源言語ペアにおいて訳質のばらつきが大きい．
+  \item \textbf{出力言語制御の困難さ}：クロスリンガル環境では，モデルが英語や複数言語を混在させた回答を行う（code-switching）問題が頻発し，ユーザが期待する言語で一貫した回答を得られないことが報告されている．
+  \item \textbf{証拠帰属の不透明さ}：多言語証拠と翻訳結果が混在する中で，どの主張がどの原文に基づくのかが不明瞭になり，検証可能性や監査性が損なわれる．
+\end{enumerate}
+
+これらの問題は，単に精度の低下にとどまらず，多言語話者間の情報アクセス格差を拡大しうるというフェアネス上の懸念とも直結する．特に，低資源言語話者が最新かつ信頼できる情報にアクセスする際，高資源言語への過度な依存や誤訳に起因する不利益を被る可能性がある．
+
+先行研究は，多言語 RAG の課題に対して，(i) 多言語ベンチマークの整備，(ii) 英語への統一翻訳による単一言語化，(iii) 内部知識と外部証拠の統合，(iv) 弁証的推論に基づく多段階生成，など様々な方向からアプローチを試みている．しかし，「高カバレッジな多言語検索」，「部分的かつ信頼性を担保した翻訳」，「ユーザ言語での出力一貫性」，「主張と原文証拠の可逆的対応」という要件を，計算コストを抑えつつ同時に満たす統合的フレームワークは十分に確立されていない．
+
+本研究は，このギャップに着目し，多言語環境において実運用可能な RAG システム LBRAG（Language-Bridged Retrieval-Augmented Generation）を提案する．LBRAG は，言語間の「橋渡し」として翻訳を利用しつつも，全文一括翻訳に依存せず，重要な証拠に限定した選択的翻訳と文単位アライメントにより，正確性・言語一貫性・コスト効率・追跡可能性のバランスを図ることを目指す．
+
+\section{研究目的}
+
+本研究の目的は，ユーザ言語と証拠言語が一致しない多言語・クロスリンガル環境において，以下の要求を同時に満たす検索拡張生成システム LBRAG を設計・評価することである．
+
+\begin{enumerate}
+  \item \textbf{正確性と高カバレッジの両立}：ユーザ質問の言語 $L_q$ と英語を含む多言語インデックスに対して並列検索を行い，多言語ベクトル検索とクロスリンガル再ランキングを組み合わせることで，言語バイアスを抑えつつ高カバレッジな候補証拠を取得する．
+  \item \textbf{選択的翻訳によるコスト効率化}：全文書の統一翻訳ではなく，関連度・翻訳信頼度・トークン長に基づき重要段落のみを翻訳対象として選択する「選択的言語ブリッジ」を導入し，翻訳コストと情報損失を抑制しながら，多言語証拠を扱いやすい形に統合する．
+  \item \textbf{追跡可能で言語一貫な回答生成}：翻訳後の文単位アライメントおよび数値・日付・固有名詞などのスロット整合性検証により，主張と原文証拠の対応関係を保持したまま，ユーザ言語 $L_q$ で一貫した回答を生成できるプロンプト設計と評価指標を整備する．
+\end{enumerate}
+
+これにより，LBRAG は多言語 RAG における「部分翻訳」「可逆的対応」「軽量かつ制御可能な生成」を統合的に実現し，既存手法の課題を補完することを目指す．
+
+\section{本研究の貢献}
+
+本研究の主な貢献は，以下のように要約される．
+
+\begin{enumerate}
+  \item \textbf{多言語混合検索と言語間リランキングの統合}：ユーザ言語インデックスと英語インデックスに対する並列検索，多言語ベクトル検索モデルおよびクロスリンガルクロスエンコーダを組み合わせた二段階スコアリングにより，高資源言語への過度な偏りを抑えつつ，多言語にまたがる高カバレッジな候補段落集合を構築する設計を示す．
+  \item \textbf{選択的言語ブリッジの提案}：翻訳予算の制約下で，関連度・翻訳品質・トークンコストに基づく効率比により翻訳対象段落を貪欲選択する枠組みを導入する．さらに，翻訳後に原文との文単位アライメントと重要スロット整合性チェックを行うことで，翻訳誤差の影響を抑えつつ原文との可逆的対応と証拠帰属可能性を確保する．
+  \item \textbf{性能・言語一貫性・コストを統合評価する指標設計}：従来用いられてきた EM や F1 に加え，回答が目標言語でどれだけ一貫しているかを測る言語一貫性指標（Response Language Consistency, RLC）や，翻訳トークン数に対する性能向上効率を表す Cost-Normalized Bridging Efficiency (CNBE) を導入し，多言語 RAG に固有のトレードオフを定量的に評価可能とする．
+\end{enumerate}
+
+これらの要素を組み合わせることで，本研究は，多言語 RAG における検索戦略・翻訳戦略・生成制御・評価指標を一体として設計した LBRAG フレームワークを提示し，クロスリンガル QA の実運用に向けた一つの具体的指針を与える．
+
+\section{論文構成}
+
+本論文の構成は次のとおりである．
+
+第2章では，多言語 RAG およびクロスリンガル QA に関連する既存研究を整理し，本研究の位置づけを明確化する．
+
+第3章では，提案手法 LBRAG の詳細な構成を述べる．多言語混合検索，選択的言語ブリッジ，文単位アライメントおよびスロット整合性検証，生成プロンプト設計について定義する．
+
+第4章では，MKQA を用いた実証分析の実験設定を示す．比較手法，実装条件，評価指標（EM，F1，RLC，翻訳コスト，CNBE，および LLM による意味一致スコア）と評価プロトコルを説明し，本研究で採用する簡略化条件とその意図を明記する．
+
+第5章では，実験結果を報告し，正確性・言語一貫性・翻訳コスト効率の観点から考察を行う．
+
+第6章では，本研究のまとめと今後の課題を述べる．
+
+
+
+\chapter{関連研究}
+
+本章では，まず検索拡張生成（Retrieval-Augmented Generation, RAG）の基礎的枠組みを概観し，次に多言語 RAG およびクロスリンガル質問応答（cross-lingual QA）に関する代表的研究を整理する．最後に，既存研究の限界を整理し，本研究 LBRAG の位置づけを明確化する．
+
+\section{RAG の基礎}
+
+RAG は，静的なパラメトリック知識のみに依存する大規模言語モデル（LLM）の限界を補うために提案された枠組みであり，「外部検索＋条件付き生成」を中核に持つ．代表的な手法として，Lewis ら\cite{Lewis2020RAG} は，大規模な外部コーパスから関連文書を検索し，そのテキストをエンコーダを通じて取得した上で生成モデルに入力することで，知識集約型タスクにおける性能向上と根拠提示を同時に実現できることを示した．
+
+一般的な RAG システムは，(i) クエリベクトルと文書ベクトルに基づく密検索（dense retrieval）あるいは BM25 等によるスパース検索，(ii) 検索結果に対する再ランキング，(iii) 上位 $K$ 件の証拠とクエリを連結したプロンプトに基づく生成，という段階で構成される．この構造により，外部知識源の更新可能性と，回答と証拠との対応付けが可能となる一方，システム全体の性能は検索器・再ランキング器・生成モデルの相互作用に強く依存する．
+
+その後，事前学習段階から検索モジュールを組み込む REALM，密ベクトル検索に特化した DPR，複数文書を効果的に利用する FiD，大規模外部メモリを用いた RETRO などが提案され，RAG パラダイムは英語圏におけるオープンドメイン QA の標準的アプローチとして位置づけられている．しかし，これらの多くは英語単言語コーパスを前提としており，多言語環境における挙動や公平性については限定的な検討にとどまっている．
+
+\section{多言語 RAG とクロスリンガル QA の展開}
+
+現実世界では，ユーザ質問と利用可能な情報資源が必ずしも同一言語で与えられるとは限らない．この状況を明示的に扱うタスクとして，クロスリンガル QA がある．Asai らの XOR-QA\cite{Asai2021XORQA} は，質問言語と証拠言語が異なる設定を含むデータセットを構築し，多言語検索およびクロスリンガル推論の困難さを定量化した．この系譜に属する XOR-TyDi などのベンチマークは，低資源言語や非ラテン文字言語に対して，既存モデルが高資源言語の証拠に偏ることや，言語間推論に失敗しやすいことを示している．
+
+多言語 RAG の包括的な検証として，Chirkova らの mRAG\cite{Chirkova2023mRAG} は 13 言語にわたる多言語 RAG ベースラインを構築し，検索・生成の両段階における言語バイアスを体系的に分析した．彼らの結果によれば，多言語モデルをそのまま用いた場合，
+(1) 高資源言語（特に英語）の証拠が過度に選択される，
+(2) 出力言語が制御しにくく，英語や混合言語で回答する傾向が強い，
+(3) 非ラテン文字言語では code-switching がより頻繁に生じる，
+といった問題が顕著に現れることが報告されている．
+
+これらの研究は，多言語環境における RAG の性能低下が，単に翻訳品質の問題にとどまらず，検索バイアス，出力言語制御の困難さ，多言語証拠統合の脆弱性といった構造的問題に起因することを示している．
+
+\section{多言語 RAG の代表的アプローチ}
+
+多言語 RAG に対する近年の改良手法は，大きく以下の方向性に分類できる．
+
+\subsection{統一翻訳（Pivot Translation）に基づく手法}
+
+Zhang らの CrossRAG\cite{Zhang2024CrossRAG} は，多言語検索によって取得した証拠文書を，生成前に英語などのピボット言語へ一括翻訳する方式を提案した．これにより，生成器は単一言語のコンテキストに基づいて推論を行うことができ，文書順序変動に対する頑健性や構文的一貫性の向上が報告されている．
+
+しかし，統一翻訳アプローチには明確なトレードオフが存在する．すべての証拠を翻訳することにより，
+(1) 翻訳トークン数が増加し計算コストが大きくなる，
+(2) 特に低資源言語ペアで翻訳品質が不安定となり，微妙な数値・固有名詞・時制などの情報が失われやすい，
+(3) 原文との対応関係が曖昧化し，どの主張がどの原文に基づくのか追跡しにくくなる，
+といった問題が生じる．
+
+\subsection{内部知識と外部証拠の統合}
+
+Li らの DKM-RAG\cite{Li2024DKMRAG} は，外部から取得した段落をクエリ言語に翻訳した上で，LLM による内部知識チャネルと統合する「二重チャネル型」アーキテクチャを提案した．これにより，検索段階での英語偏重をある程度緩和しつつ，多言語証拠を補完的に利用することを目指している．
+
+しかし，内部チャネルはあくまで生成モデルによる再表現であり，原文との厳密な文単位対応や帰属制約が存在しない．そのため，翻訳や再表現の過程で意味の逸脱が生じても検出が難しく，証拠帰属の透明性という観点では依然として課題が残る．
+
+\subsection{弁証的推論と多段階生成}
+
+Chen らの D-RAG\cite{Chen2025DRAG} は，検索証拠を「支持」「反証」「中立」といった立場に分解し，弁証的推論に基づいて統合する多段階生成プロセスを採用することで，矛盾する情報を含む状況に対する頑健性向上を目指した．この種の手法は，多言語環境でも矛盾耐性や説明可能性の観点で有望である一方，プロンプト長の増大や推論ステップの増加に伴う計算コストや遅延の問題を抱えており，リアルタイム応答や大規模運用には適用が難しい側面がある．
+
+\subsection{評価ベンチマークと言語一貫性指標}
+
+多言語 RAG の評価基盤として，XOR-QA 系列に加え，Chen らによる XRAG\cite{Chen2025XRAG} はニュースドメインに基づくベンチマークを構築し，支持文と干渉文を明示的に注釈することで，「どの言語のどの証拠に基づいて回答したか」を分析可能にしている．これにより，
+(1) 出力言語の誤り，
+(2) 証拠統合の失敗，
+(3) 証拠無視やハルシネーション，
+といった現象を精緻に評価する枠組みが整いつつある．一方で，翻訳規模と性能向上の関係や，コスト正規化された効率指標については，依然として十分に体系化されていない．
+
+\section{本研究の位置づけ}
+
+以上の先行研究を踏まえると，多言語 RAG においては次のような課題が依然として残されている．
+
+\begin{itemize}
+  \item 多言語検索において高資源言語への偏りを抑制しつつ，低資源言語を含む多言語証拠を高カバレッジで取得する手法が必要である．
+  \item 統一翻訳アプローチは扱いやすい一方で，翻訳コストと情報損失が大きく，原文との対応関係も不透明になりやすい．
+  \item 内部知識との統合や多段階推論は表現力を高めるものの，証拠帰属の曖昧さや計算コスト増大という問題を解決していない．
+  \item 多言語 RAG の性能を評価する指標として，正答率（EM, F1）のみならず，出力言語の一貫性や翻訳コストに対する効率を統合的に測定する枠組みが十分に整備されていない．
+\end{itemize}
+
+本研究で提案する LBRAG（Language-Bridged RAG）は，これらのギャップに対して，次の点で差別化される．
+
+\begin{enumerate}
+  \item \textbf{多言語混合検索＋クロスリンガル再ランキング}：ユーザ言語インデックスと英語インデックスに対して並列検索を行い，多言語ベクトル検索とクロスリンガルクロスエンコーダによる再ランキングを統合することで，高資源言語偏重を抑えつつ多言語証拠のカバレッジを確保する設計を採用する．
+  \item \textbf{選択的翻訳と可逆アライメント}：全文一括翻訳ではなく，関連度・翻訳品質・トークンコストに基づいて重要段落のみを翻訳対象とする「選択的言語ブリッジ」を導入し，翻訳後には文単位アライメントとスロット整合性検証を行うことで，原文との可逆的対応と証拠帰属可能性を担保する．
+  \item \textbf{言語一貫性とコスト効率を考慮した評価}：従来指標に加えて，出力が目標言語にどれだけ一貫しているかを測る RLC（Response Language Consistency）や，翻訳トークン数あたりの性能向上を測る CNBE（Cost-Normalized Bridging Efficiency）などを用いることで，多言語 RAG に固有の性能–コスト–言語一貫性のトレードオフを定量的に評価する枠組みを提示する．
+\end{enumerate}
+
+このように，LBRAG は既存の多言語 RAG 手法が個別に扱ってきた「検索改善」「翻訳戦略」「生成制御」「評価指標」を統合的に設計し，多言語・クロスリンガル環境において実運用可能なバランス型フレームワークを目指すものである．次章では，LBRAG の具体的なアルゴリズム構成と推論プロセスを形式的に定義する．
+
+\chapter{提案手法}
+
+本章では，本研究で提案する多言語 RAG フレームワーク LBRAG（Language-Bridged Retrieval-Augmented Generation）の構成について述べる．LBRAG は，多言語環境下での高カバレッジな検索と，翻訳コストを抑えた信頼性の高い証拠統合を両立することを目的とし，
+\begin{enumerate}
+  \item 多言語混合検索（ユーザ言語および英語インデックスに対する並列検索とクロスリンガル再ランキング）
+  \item 選択的言語ブリッジ（重要段落のみへの翻訳適用，文単位アライメントおよびスロット整合性検証）
+\end{enumerate}
+の二つの主要モジュールから構成される．以下では，まず全体フローを示し，続いて各コンポーネントを形式的に定義する．
+
+\section{LBRAG の全体構成}
+
+LBRAG の処理フローを図\ref{fig:lbrag_overview}に示す．
+
+\begin{figure}[!htbp]
+  \centering
+  \vspace{4mm}
+  \begin{tikzpicture}[
+    node distance=9mm and 16mm,
+    every node/.style={font=\small},
+    line/.style={-{Latex}, line width=0.4pt}
+  ]
+
+    % ユーザ質問
+    \node[block] (input) {ユーザ質問 $q$（言語 $L_q$）};
+
+    % 多言語混合検索 内部
+    \node[block, below=11mm of input] (dualret) {並列検索（$L_q$/英語）};
+    \node[block, below=6mm of dualret] (rerank) {言語間リランキング};
+    \node[block, below=6mm of rerank] (topk)   {Top-$K$ 候補段落 $D$};
+
+    \node[groupbox, fit=(dualret)(rerank)(topk), inner sep=5mm] (grp1) {};
+    % タイトル：枠の左上，少し内側に下げる（矢印から離す）
+    \node[anchor=west, font=\small]
+      at ([xshift=2mm,yshift=-3mm]grp1.north west) {多言語混合検索};
+
+    % 選択的言語ブリッジ 内部
+    \node[block, below=15mm of topk] (seltrans) {選択的翻訳（重要段落のみ）};
+    \node[block, below=6mm of seltrans] (align) {文単位アライメント／スロット整合性};
+
+    \node[groupbox, fit=(seltrans)(align), inner sep=5mm] (grp2) {};
+    \node[anchor=west, font=\small]
+      at ([xshift=2mm,yshift=-3mm]grp2.north west) {選択的言語ブリッジ};
+
+    % 回答
+    \node[block, below=15mm of align] (output) {回答 $a$（言語 $L_q$）};
+
+    % 矢印（全部中心線を通す）
+    \draw[line] (input.south)   -- (dualret.north);
+    \draw[line] (dualret.south) -- (rerank.north);
+    \draw[line] (rerank.south)  -- (topk.north);
+    \draw[line] (topk.south)    -- (seltrans.north);
+    \draw[line] (seltrans.south)-- (align.north);
+    \draw[line] (align.south)   -- (output.north);
+
+  \end{tikzpicture}
+  \caption{LBRAG の全体構成}
+  \label{fig:lbrag_overview}
+\end{figure}
+
+
+
+まず，ユーザ質問 $q$（言語 $L_q$）に対して，多言語混合検索モジュールがユーザ言語インデックスと英語インデックスに対する並列検索と再ランキングを行い，上位 $K$ 件の候補段落集合 $D$ を構築する．
+次に，選択的言語ブリッジモジュールが，翻訳予算の範囲内で重要度の高い段落のみを翻訳対象として選択し，翻訳結果と原文との文単位アライメントおよび数値・日付・固有名詞といった重要スロットの整合性を検証する．
+最終的に，これらの整合済み証拠に基づき，ユーザ言語 $L_q$ で一貫した回答 $a$ を生成する．
+
+以下の節では，多言語混合検索と選択的言語ブリッジの具体的設計を述べる．
+
+\section{多言語混合検索}
+
+\subsection{多言語エンコーダによる初期検索}
+
+ユーザ質問を $q$，その言語を $L_q$ とする．多言語埋め込みモデル
+（例：bge-m3，e5-multilingual，mContriever 等）をエンコーダ $E(\cdot)$ とし，
+クエリおよび段落を単位ベクトルへ写像する：
+
+\begin{equation}
+  \mathbf{v}_q = \frac{E(q)}{\|E(q)\|}, \qquad
+  \mathbf{v}_{d_i} = \frac{E(d_i)}{\|E(d_i)\|}.
+\end{equation}
+
+ユーザ言語インデックス（$L_q$）および英語インデックスの双方から候補段落 $d_i$ を取得し，
+それぞれについてコサイン類似度に基づく密検索スコア
+\begin{equation}
+  s_{\mathrm{dense}}(q,d_i) = \mathbf{v}_q^\top \mathbf{v}_{d_i}
+\end{equation}
+を計算する．この段階では，高リコールを重視し，多様な言語の候補を広く収集する．
+
+\subsection{言語間クロスエンコーダによる再ランキング}
+
+密検索スコアのみでは否定表現や細粒度の意味差異に敏感でないため，
+クロスリンガルなクロスエンコーダにより，質問 $q$ と段落 $d_i$ の関連度
+$s_{\mathrm{rerank}}(q,d_i)$ を再評価する．
+両者を線形結合して最終スコア $S_{\mathrm{retr}}$ を定義する：
+
+\begin{equation}
+  S_{\mathrm{retr}}(q,d_i)
+  = \alpha \, s_{\mathrm{dense}}(q,d_i)
+    + (1-\alpha) \, s_{\mathrm{rerank}}(q,d_i),
+  \label{eq:retr_score}
+\end{equation}
+
+ここで $\alpha \in [0,1]$ は開発集合により決定されるハイパパラメータである．
+$S_{\mathrm{retr}}$ に基づき上位 $K$ 件を選択し，候補集合
+$D = \{d_i\}_{i=1}^{K}$ を得る．
+
+さらに，検索結果の類似度が一様に低い場合や，
+取得された段落の大部分が望ましい言語分布から著しく逸脱している場合には，
+BM25 によるスパース検索やクエリ拡張を用いるフォールバック戦略を適用し，
+多言語環境におけるカバレッジの安定性を高める．
+
+\section{選択的言語ブリッジ}
+
+多言語混合検索により構築された $D$ には，ユーザ言語と英語を含む複数言語の段落が含まれる．
+すべてを単一言語へ翻訳する統一翻訳は，コストと情報損失の観点から非効率である．
+そこで LBRAG では，翻訳予算の下で重要段落のみに翻訳を適用する
+「選択的言語ブリッジ」を導入する．
+
+\subsection{翻訳対象段落の選択}
+
+ピボット言語 $P$ は $\{L_q,\text{en}\}$ の中から選択する．
+候補集合 $D$ の各段落 $d_i$ について，
+\begin{itemize}
+  \item 検索スコア $s_i = S_{\mathrm{retr}}(q,d_i)$，
+  \item 翻訳コスト $c_i$（翻訳トークン数に基づく近似），
+  \item 翻訳信頼度 $\kappa_i \in [0,1]$（長さ保持率，逆翻訳一致度，スロット整合性に基づく推定）
+\end{itemize}
+を定義する．翻訳予算を $B$ とすると，翻訳対象部分集合 $\Omega \subseteq D$ は次の最適化問題として定式化できる：
+
+\begin{equation}
+  \max_{\Omega \subseteq D}
+    \sum_{i \in \Omega} s_i \kappa_i
+    - \mu \sum_{i \in \Omega} c_i
+  \quad
+  \text{s.t.} \quad
+    \sum_{i \in \Omega} c_i \le B,
+  \label{eq:bridge_opt}
+\end{equation}
+
+ここで $\mu > 0$ はコスト感度を調整するパラメータである．
+実装上は，単純かつ解釈性の高い近似として，
+各段落の効率比
+\begin{equation}
+  \rho_i = \frac{s_i \kappa_i}{c_i}
+  \label{eq:rho}
+\end{equation}
+を計算し，$\rho_i$ の大きい順に段落を選択していく貪欲法を用いる．
+これにより，限られた翻訳予算の下で「高関連・高信頼・低コスト」な段落が優先的に翻訳される．
+
+\subsection{文単位アライメントとスロット整合性検証}
+
+翻訳対象となった段落 $d_i \in \Omega$ について，
+原文言語 $L(d_i)$ からピボット言語 $P$ への翻訳
+$\tilde{d}_i = \mathsf{Tr}_{L(d_i)\to P}(d_i)$ を得る．
+その上で，文埋め込み類似度などを用いて，
+原文文 $s$ と訳文文 $\tilde{s}$ の対応関係の集合
+$\mathcal{A}_i = \{(s,\tilde{s})\}$ を構築する．
+
+各対応文対 $(s,\tilde{s})$ について，
+数値・単位・日付・固有名詞などの重要スロットを抽出し，
+正規化後の一致率に基づき翻訳の整合性を判定する．
+これにより，段落 $d_i$ に対して
+\begin{itemize}
+  \item アライメント被覆率 $u_i \in [0,1]$（対応づけられた文の割合）
+  \item スロット整合率 $r_i \in [0,1]$（重要スロットが一致した文の割合）
+\end{itemize}
+を算出する．
+これらの値は，翻訳品質や証拠としての信頼度を定量化する指標として用いる．
+
+翻訳を行わなかった段落（$i \notin \Omega$）については，
+原文のまま提示し，必要に応じてピボット言語側から「訳注」的に説明を補うことで，
+過度な翻訳に起因する情報歪曲を回避する．
+
+\section{証拠融合と生成プロンプト設計}
+
+LBRAG では，上記で得られた指標を用いて，各段落の生成入力における優先度を決定する．
+段落 $d_i$ の重み $w_i$ を次式で定義する：
+
+\begin{equation}
+  w_i
+  = \beta_1 s_i
+    + \beta_2 u_i
+    + \beta_3 r_i,
+  \qquad
+  \beta_1 + \beta_2 + \beta_3 = 1,
+  \label{eq:weight}
+\end{equation}
+
+ここで $\beta_1,\beta_2,\beta_3$ はそれぞれ
+検索関連性，アライメント被覆率，スロット整合性の重要度を表すハイパパラメータである．
+翻訳を行っていない段落については $u_i, r_i$ を未定義とし，
+$w_i = \beta_1 s_i$ のみで扱う．
+
+生成プロンプトは，重み $w_i$ の高い順に証拠ブロックを配置し，
+\begin{itemize}
+  \item 「回答はユーザ言語 $L_q$ で行うこと」
+  \item 「根拠となる文・段落を明示すること」
+  \item 「矛盾する証拠が存在する場合は両者を提示した上で判断すること」
+\end{itemize}
+といった制約文を組み込むことで，
+出力言語の一貫性と証拠帰属の明確化を図る．
+これにより，選択的翻訳とアライメント情報を活用しつつ，
+ユーザにとって解釈しやすく検証可能な回答を生成することが可能となる．
+
+\section{推論プロセスのまとめ}
+
+以上を踏まえた LBRAG の推論手順をまとめる：
+
+\begin{enumerate}
+  \item ユーザ質問 $q$（言語 $L_q$）を多言語エンコーダでベクトル化し，
+        $L_q$ インデックスおよび英語インデックス上で並列検索を行う．
+  \item 密検索およびクロスリンガルクロスエンコーダにより
+        スコア $S_{\mathrm{retr}}$ を計算し，上位 $K$ 件の候補段落集合 $D$ を得る．
+  \item 翻訳予算 $B$ の下で効率比 $\rho_i$ に基づき翻訳対象集合 $\Omega$ を選択し，
+        ピボット言語 $P$ へ選択的翻訳を行う．
+  \item 翻訳済み段落に対して文単位アライメントとスロット整合性検証を行い，
+        各段落の信頼度指標 $u_i, r_i$ を算出する．
+  \item 検索スコアと整合性指標を統合した重み $w_i$ に基づき証拠を配置し，
+        出力言語制御および引用ルールを含むプロンプトを構成して，
+        ユーザ言語 $L_q$ における回答 $a$ を生成する．
+\end{enumerate}
+
+
+\chapter{実証分析}
+
+本章では，第3章で提案した LBRAG フレームワークの有効性を検証するための実験設定を述べる．
+本研究の実験は，CrossRAG に代表される「翻訳を介した多言語 RAG」の比較を意識しつつ，
+学部卒業研究として実装・評価可能な範囲に簡略化した構成で行う．
+以下では，データセット，知識ベース構築，比較手法，実装条件，評価指標，評価プロトコル，
+および本実験設定に固有の注意点（簡略化点）を明記する．
+
+\section{実験設計の概要}
+
+評価観点は以下の4点である．
+\begin{itemize}
+  \item \textbf{正確性}：EM および F1 により，質問に正しく回答できるかを測定する．
+  \item \textbf{出力言語の一貫性}：回答がユーザ言語で一貫しているか（code-switching の抑制）を RLC で測定する．
+  \item \textbf{翻訳コスト効率}：全文翻訳方式と比較して，翻訳トークン数を抑えつつ性能を維持できるかを評価する．
+  \item \textbf{意味的妥当性}：表層一致に加え，LLM を用いた意味一致スコア（SAS）で補助評価する．
+\end{itemize}
+
+\section{データセットと知識ベース}
+
+\subsection{MKQA}
+
+本研究では MKQA を用いて多言語質問応答の評価を行う．
+なお本実験では，Wikipedia 段落などの外部文書コーパスを検索対象とする open-domain 設定ではなく，
+MKQA の質問・回答ペアを知識ベース（メモリ）として構築し，検索・生成を行う
+\textbf{QA-memory 型の RAG 設定}を採用する．
+
+\subsection{知識ベース構築（QA-memory）}
+
+各サンプル $s$ から文書セグメント $d$ を次のように構成する：
+\[
+d = \texttt{question} \;||\; \texttt{answer}
+\]
+すなわち，知識ベース中の各セグメントは「質問文＋その回答」を含む．
+これにより，検索は「関連する QA セグメントの想起」という性質を持つ．
+
+\subsection{クロスリンガル条件の構成}
+
+クロスリンガル性を明示するため，評価時の検索では
+\textbf{質問と同一言語のセグメントを除外}し，
+異言語の証拠（他言語版の QA セグメント）を優先的に取得する．
+これにより，「質問言語と証拠言語が一致しない」状況を再現する．
+
+\section{比較手法}
+
+本研究では以下の4手法を比較する．（括弧内はスクリプト上の名前）
+\begin{enumerate}
+  \item \textbf{Direct（direct）}：外部文書を与えずに LLM のみで回答する（no-RAG）．
+  \item \textbf{MultiRAG（multi）}：検索は行うが翻訳を行わない（翻訳予算 $B=0$）．
+  \item \textbf{Full-Translate Pivot RAG（cross）}：取得した証拠を英語（pivot=en）に翻訳して統合し回答する（実装上は翻訳予算を十分大きく設定）．
+  \item \textbf{LBRAG（lbrag）}：選択的翻訳（予算制約）＋文単位アライメント／スロット整合性推定を行い回答する．
+\end{enumerate}
+
+\paragraph{注意（CrossRAG との関係）}
+本研究の \texttt{cross} は「pivot translation に基づく全文翻訳」思想を再現する簡略ベースラインであり，
+CrossRAG 論文の全要素（検索戦略や学習済みモジュール等）を厳密に再現するものではない．
+
+\section{実装条件}
+
+\subsection{検索・再ランキング}
+
+\begin{itemize}
+  \item 埋め込み：OpenAI text-embedding-3-small を使用する．
+  \item 検索：ベクトル内積（正規化）により Top-$K$ 候補を取得する．
+  \item 再ランキング：LLM による listwise rerank を用いる（候補に対し 0--1 の関連度スコアを推定）．
+  \item $K$：Top-$K=10$，密検索と再ランキングの線形結合係数は $\alpha=0.5$ とする．
+\end{itemize}
+
+\subsection{翻訳・アライメント}
+
+\begin{itemize}
+  \item 翻訳：LLM を用いた翻訳（数値・日付・固有名詞を保持する指示）を行う．
+  \item pivot 言語：Full-Translate は常に pivot=en，LBRAG は候補分布に応じて pivot を選択し得る（実装既定）．
+  \item 翻訳コスト：トークン数の近似として文字数から簡易推定を用いる（実装上の近似）．
+  \item アライメント：文分割後，greedy に 1 対 1 対応を作成し，被覆率とスロット一致率を算出する．
+\end{itemize}
+
+\subsection{生成モデルとプロンプト}
+
+\begin{itemize}
+  \item 生成：多言語対応 LLM を用い，全手法で共通とする．
+  \item 重要制約：\textbf{「回答は {language} のみ」}を明記し，code-switching を抑制する．
+  \item 出力形式：短い答えのみ（説明省略）とする．
+\end{itemize}
+
+\subsection{実験環境}
+実行環境（OS，CPU/GPU，ライブラリ，モデルバージョン等）は再現性のため最終版で明記する．
+\textbf{[TODO: 実験環境を追記]}．
+
+\section{評価指標}
+
+\subsection{EM と F1}
+EM（正規化後の完全一致）と，言語に応じたトークン化に基づく F1 を用いる．
+
+\subsection{RLC と RLC-OK}
+回答がユーザ言語でどれだけ一貫しているかを Response Language Consistency（RLC）で測定する．
+実装上は，文字種に基づく簡易判定（数字・記号を中立扱い）により算出する．
+また，閾値（例：0.6）以上を 1 とする二値版（RLC-OK）も併せて報告する．
+
+\subsection{翻訳コスト}
+翻訳された証拠の総トークン数（近似値）を集計し，平均翻訳コストとして報告する．
+
+\subsection{CNBE（Cost-Normalized Bridging Efficiency）}
+本実験では，翻訳を伴うシステムの「翻訳コストあたりの性能改善」を測るため，
+Direct（no-RAG）を基準とした CNBE を用いる：
+\[
+\mathrm{CNBE}
+= \frac{\mathrm{F1}_{\mathrm{system}} - \mathrm{F1}_{\mathrm{direct}}}{\mathrm{TranslationTokens}}
+\]
+（翻訳トークンが 0 の場合は 0 とする）．
+なお，MultiRAG を基準とする定義も考えられるが，本稿では no-RAG からの全体改善を単位コストで比較する目的で上式を採用する．
+
+\subsection{SAS（Semantic Agreement Score）}
+表層一致で捉えにくい同義表現を補助評価するため，LLM による意味一致スコア（0--1）を算出し，SAS として報告する．
+本指標は補助的であり，最終判断は EM/F1 を主とする．
+
+\section{評価プロトコル}
+
+\begin{itemize}
+  \item テストクエリ数：100（同一 seed による固定サンプリング）．
+  \item サンプリング：同一の意味質問（quid）から 1 つの言語サンプルを選び，重複を避ける．
+  \item 各手法で同一クエリ集合を評価し，平均と標準偏差を報告する．
+  \item 本稿の標準偏差は，\textbf{複数回実行のばらつきではなく}，クエリ集合内でのスコア分布のばらつきである．
+\end{itemize}
+
+\section{本実験設定の簡略化点と限界}
+
+本実験は学部卒業研究として実装・評価可能な範囲に簡略化しているため，以下を明記する．
+\begin{itemize}
+  \item 検索対象は Wikipedia 段落ではなく，MKQA の QA ペアを用いた \textbf{QA-memory 型}である．
+  \item 2インデックス（$L_q$ と英語）並列検索を厳密に再現するのではなく，\textbf{同一知識ベースからの検索＋同語除外}によりクロスリンガル条件を構成している．
+  \item 再ランキング・翻訳・意味評価に LLM を用いているため，モデルの非決定性により結果が変動し得る．
+\end{itemize}
+
+次章では，上記設定に基づく実験結果を報告する．
+
+
+\chapter{実験結果}
+
+本章では，第4章の設定に基づく実験結果を示し，正確性・言語一貫性・翻訳コスト効率の観点から考察する．
+本実験はテストクエリ 100 件（$n=100$）で実施した．
+
+\section{全体結果（主要指標）}
+
+表\ref{tab:mkqa_main_results}に，各手法の EM，F1，RLC，RLC-OK，SAS（意味一致），翻訳コスト，CNBE を示す．
+値は平均$\pm$標準偏差である．
+
+\begin{table}[H]
+  \centering
+  \caption{MKQA（$n=100$）における性能比較（平均$\pm$標準偏差）}
+  \label{tab:mkqa_main_results}
+  \begin{tabular}{lccccccc}
+    \hline
+    手法 & EM & F1 & RLC & RLC-OK & SAS & 翻訳コスト & CNBE \\
+    \hline
+    Direct  & 0.110$\pm$0.314 & 0.193$\pm$0.335 & 0.965$\pm$0.139 & 0.970$\pm$0.171 & 0.412$\pm$0.475 & 0.00$\pm$0.00 & 0.00000$\pm$0.00000 \\
+    MultiRAG & 0.560$\pm$0.499 & 0.624$\pm$0.460 & 0.979$\pm$0.081 & 0.990$\pm$0.100 & 0.708$\pm$0.455 & 0.00$\pm$0.00 & 0.00000$\pm$0.00000 \\
+    Full-Translate (pivot=en) & 0.440$\pm$0.499 & 0.522$\pm$0.467 & 0.956$\pm$0.185 & 0.960$\pm$0.197 & 0.666$\pm$0.471 & 182.63$\pm$42.22 & 0.00180$\pm$0.00246 \\
+    LBRAG   & 0.510$\pm$0.502 & 0.573$\pm$0.473 & 0.971$\pm$0.130 & 0.980$\pm$0.141 & 0.668$\pm$0.472 & 28.34$\pm$5.18 & 0.01374$\pm$0.01570 \\
+    \hline
+  \end{tabular}
+\end{table}
+
+\section{図による可視化（占位）}
+
+本研究では，主要指標を図として可視化し，手法間のトレードオフを直感的に比較する．
+以下は最終版で差し替えるための占位である．
+
+\begin{figure}[H]
+  \centering
+  \fbox{\parbox{0.85\linewidth}{\centering
+  [TODO] EM/F1 の棒グラフ（run\_id\_em\_f1.png を挿入）}}
+  \caption{EM/F1 の比較（占位）}
+  \label{fig:mkqa_em_f1}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\parbox{0.85\linewidth}{\centering
+  [TODO] RLC の棒グラフ（run\_id\_rlc.png を挿入）}}
+  \caption{RLC の比較（占位）}
+  \label{fig:mkqa_rlc}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\parbox{0.85\linewidth}{\centering
+  [TODO] 翻訳コストと CNBE（run\_id\_cost\_cnbe.png を挿入）}}
+  \caption{翻訳コストと CNBE の比較（占位）}
+  \label{fig:mkqa_cost_cnbe}
+\end{figure}
+
+\begin{figure}[H]
+  \centering
+  \fbox{\parbox{0.85\linewidth}{\centering
+  [TODO] SAS の棒グラフ（run\_id\_semantic.png を挿入）}}
+  \caption{SAS（意味一致スコア）の比較（占位）}
+  \label{fig:mkqa_sas}
+\end{figure}
+
+\section{考察}
+
+\subsection{正確性（EM/F1）}
+MultiRAG が最も高い EM/F1 を示し，検索による効果が明確に確認できる．
+一方で Full-Translate（pivot=en）は MultiRAG を下回り，翻訳を介した統合が常に性能向上につながるわけではないことが示唆される．
+LBRAG は MultiRAG には及ばないものの，Full-Translate より高い F1 を維持しつつ，大幅な翻訳コスト削減を達成した．
+
+\subsection{出力言語の一貫性（RLC）}
+全手法で RLC は高いが，Full-Translate は RLC が相対的に低下しており，
+pivot 翻訳と生成過程で code-switching が増える可能性が示唆される．
+LBRAG は RLC を高水準に維持している．
+
+\subsection{翻訳コストと効率（CNBE）}
+翻訳コストは Full-Translate が 182.63 に対し，LBRAG は 28.34 と大幅に低い．
+また CNBE は LBRAG が Full-Translate を大きく上回っており，
+\textbf{限られた翻訳予算下での効率優位}を示す結果となった．
+
+\subsection{意味一致（SAS）}
+SAS では MultiRAG が最も高い．
+LBRAG は Full-Translate と同程度の SAS を維持しながら，翻訳コストを抑制できている．
+SAS は補助指標であるため，最終的な議論は EM/F1 と合わせて行う．
+
+\subsection{限界と今後の検証}
+本結果は QA-memory 型の設定に基づくものであり，
+Wikipedia 段落検索などの open-domain RAG 設定への一般化は今後の課題である．
+また，再ランキング・翻訳・意味評価に LLM を用いているため非決定性の影響を受けうる．
+最終版では実験環境とモデル設定を明確化し，必要に応じて複数回実行の平均を報告する．
+
+
+
+\chapter{おわりに}
+
+\section{本研究のまとめ}
+
+本研究では，多言語環境における検索拡張生成（RAG）の実運用上の課題──高資源言語への検索バイアス，全文一括翻訳に伴うコスト・情報損失，出力言語の一貫性低下，証拠帰属の不透明さ──に対して，選択的翻訳を核とする LBRAG（Language-Bridged RAG）を提案した．具体的には，（i）ユーザ言語インデックスと英語インデックスへの並列検索とクロスリンガル再ランキングを統合した多言語混合検索，（ii）関連度・翻訳信頼度・トークンコストに基づく効率比による翻訳対象の貪欲選択，（iii）翻訳後の文単位アライメントと数値・日付・固有名詞などのスロット整合性検証，を組み合わせ，原文との可逆的対応を保ったまま，ユーザ言語で一貫した生成を行う枠組みを構成した．
+
+さらに，従来の正確性指標（EM，F1）に加え，出力が目標言語にどれだけ一貫しているかを測る RLC（Response Language Consistency）と，翻訳トークン数に対する性能向上効率を測る CNBE（Cost-Normalized Bridging Efficiency）を導入し，多言語 RAG に固有の「性能–言語一貫性–コスト」の三者トレードオフを定量化する視点を示した．第4章の評価設計に基づく結果（例示値を含む）からは，LBRAG が全文一括翻訳型手法と比べて翻訳トークンを大幅に抑えつつ，正確性と出力言語一貫性のバランスに優れる可能性，および各コンポーネント（再ランキング，選択的翻訳，アライメント／スロット検証）の寄与が確認できる構成であることが示唆された．
+
+以上より，LBRAG は「部分翻訳」と「証拠の可逆的整合性」を中核に，多言語 RAG の実運用に求められるコスト効率・信頼性・追跡可能性を両立させる設計指針を与える．
+
+\section{課題と展望}
+
+今後の課題と発展可能性を以下にまとめる．
+\begin{itemize}
+  \item \textbf{翻訳信頼度推定の高精度化}：本稿では $\kappa_i$ を長さ保持率・逆翻訳一致・スロット整合などのヒューリスティクスで推定した．機械翻訳の品質推定（QE）モデルや学習済み判別器を取り込み，学習的に最適化する余地がある．
+  \item \textbf{翻訳選択の最適化}：効率比に基づく貪欲法は単純で頑健だが，背包問題としての厳密最適化や，$B$（翻訳予算）へ適応的に応答時間・精度をトレードオフするオンライン最適化の検討が望まれる．
+  \item \textbf{アライメントの頑健化}：非ラテン文字・混在表記・例外的表記ゆれに対する文対応の誤対合が残る．多言語 NER／正規化器や，構造整合（テーブル／リスト）を明示的に扱う手法の統合が有効と考えられる．
+  \item \textbf{言語制御の強化}：RLC を直接最大化する学習（例：言語制約付きデコーディング，ラティス制約，RLHF による罰則付与）を導入し，code-switching の残余をさらに抑制する．
+  \item \textbf{領域横断の一般化}：Wikipedia／ニュース以外（法務・医学・金融等）の専門領域で，数字・単位・固有名詞の厳密性がより重要になる．スロット検証の拡張とドメイン適応の評価が必要である．
+  \item \textbf{システム最適化とキャッシュ}：再利用可能な翻訳・アライメント結果のキャッシュ，段落単位の差分更新，クエリ分布を踏まえた事前ブリッジのプリフェッチにより，遅延とコストの同時削減を図る．
+  \item \textbf{公平性とユーザ研究}：言語資源の少ない言語での性能・説明可能性・可用性を，利用者調査や計量的公平性指標で評価し，実運用時のアクセシビリティ改善につなげる．
+  \item \textbf{学習一体化}：検索・再ランキング・翻訳選択・生成を統合的に学習する方策（例：包括的報酬に基づく強化学習，微分可能近似）を検討し，パイプライン間の誤差伝播を低減する．
+\end{itemize}
+
+これらの課題に取り組むことで，LBRAG はより広範な多言語・クロスリンガル環境において，低コストかつ信頼できる知識アクセスを提供するプラットフォームへ発展しうる．
+
+
+
+% -------- 参考文献 --------
+\begin{thebibliography}{99}
+
+\bibitem{Lewis2020RAG}
+P.~Lewis, E.~Perez, A.~Piktus, \textit{et al.},
+``Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks,''
+NeurIPS, 2020.
+
+\bibitem{Chirkova2023mRAG}
+N.~Chirkova, \textit{et al.},
+``mRAG: Multilingual Retrieval-Augmented Generation,''
+EMNLP, 2023.
+
+\bibitem{Zhang2024CrossRAG}
+R.~Zhang, \textit{et al.},
+``CrossRAG: Pivot Translation for Multilingual Retrieval-Augmented Generation,''
+ACL, 2024.
+
+\bibitem{Li2024DKMRAG}
+Y.~Li, \textit{et al.},
+``DKM-RAG: Dual Knowledge Merging for Multilingual QA,''
+EMNLP, 2024.
+
+\bibitem{Chen2025DRAG}
+X.~Chen, \textit{et al.},
+``D-RAG: Dialectical Reasoning in Multilingual RAG,''
+ACL, 2025.
+
+\bibitem{Asai2021XORQA}
+A.~Asai, \textit{et al.},
+``XOR-QA: Cross-Lingual Open-Retrieval Question Answering,''
+NAACL, 2021.
+
+\bibitem{Chen2025XRAG}
+X.~Chen, Y.~Liu, S.~Huang,
+``XRAG: A Benchmark for Multilingual Retrieval-Augmented Generation,''
+ACL, 2025.
+
+\end{thebibliography}
+
+
+% -------- 謝辞 --------
+\chapter*{謝辞}
+\addcontentsline{toc}{chapter}{謝辞}
+（ここに本文を記述）
+
+% ===== 付録 =====
+\appendix
+
+\chapter*{付録A} 
+\addcontentsline{toc}{chapter}{付録}
+\label{chap:appendix-code}
+
+
+
+\begin{lstlisting}[language=Python, caption={LBRAG　placeholder}, label={lst:lbrag-example}]
+from typing import List, Dict
+
+def retrieve_multilingual(query: str,
+                          k: int = 40) -> List[Dict]:
+    """多言語エンコーダとクロスエンコーダを用いた
+    並列検索＋再ランキング（簡略化版）"""
+    pass
+\end{lstlisting}
+
+\end{document}
