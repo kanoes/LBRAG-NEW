@@ -1,11 +1,36 @@
 {
-    "files.exclude": {
-      "**/__pycache__": true
-    },
-    "search.exclude": {
-      "**/__pycache__": true
-    },
-    "[plaintext]": {
-      "editor.wordWrap": "on"
+  "files.exclude": {
+    "**/__pycache__": true
+  },
+  "search.exclude": {
+    "**/__pycache__": true
+  },
+  "[plaintext]": {
+    "editor.wordWrap": "on"
+  },
+
+  // ===== LaTeX Workshop: Auto build with XeLaTeX =====
+  "latex-workshop.latex.autoBuild.run": "onSave",
+  "latex-workshop.view.pdf.viewer": "tab",
+
+  "latex-workshop.latex.tools": [
+    {
+      "name": "latexmk-xe",
+      "command": "latexmk",
+      "args": [
+        "-xelatex",
+        "-synctex=1",
+        "-interaction=nonstopmode",
+        "-file-line-error",
+        "%DOC%"
+      ]
     }
-  }
+  ],
+  "latex-workshop.latex.recipes": [
+    {
+      "name": "latexmk (xelatex)",
+      "tools": ["latexmk-xe"]
+    }
+  ],
+  "latex-workshop.latex.recipe.default": "latexmk (xelatex)"
+}

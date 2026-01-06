@@ -1,0 +1,121 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand*\HyPL@Entry[1]{}
+\HyPL@Entry{0<</S/D>>}
+\HyPL@Entry{1<</S/D>>}
+\@writefile{toc}{\contentsline {chapter}{\numberline {第1章}はじめに}{3}{chapter.1}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\jsc@mpt }}
+\@writefile{lot}{\addvspace {10\jsc@mpt }}
+\@writefile{toc}{\contentsline {section}{\numberline {1.1}研究背景}{3}{section.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{具体例（多言語RAGが想定する状況）}{4}{section*.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.2}研究目的}{5}{section.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.3}本研究の貢献}{5}{section.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1.4}論文構成}{6}{section.1.4}\protected@file@percent }
+\citation{Lewis2020RAG}
+\@writefile{toc}{\contentsline {chapter}{\numberline {第2章}関連研究}{7}{chapter.2}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\jsc@mpt }}
+\@writefile{lot}{\addvspace {10\jsc@mpt }}
+\@writefile{toc}{\contentsline {section}{\numberline {2.1}RAG の基礎}{7}{section.2.1}\protected@file@percent }
+\citation{Asai2021XORQA}
+\citation{Chirkova2023mRAG}
+\citation{Zhang2024CrossRAG}
+\@writefile{toc}{\contentsline {section}{\numberline {2.2}多言語 RAG とクロスリンガル QA の展開}{8}{section.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.3}多言語 RAG の代表的アプローチ}{8}{section.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.1}統一翻訳（Pivot Translation）に基づく手法}{8}{subsection.2.3.1}\protected@file@percent }
+\citation{Li2024DKMRAG}
+\citation{Chen2025DRAG}
+\citation{Chen2025XRAG}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.2}内部知識と外部証拠の統合}{9}{subsection.2.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.3}弁証的推論と多段階生成}{9}{subsection.2.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3.4}評価ベンチマークと言語一貫性指標}{9}{subsection.2.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2.4}本研究の位置づけ}{10}{section.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {第3章}提案手法}{12}{chapter.3}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\jsc@mpt }}
+\@writefile{lot}{\addvspace {10\jsc@mpt }}
+\@writefile{toc}{\contentsline {section}{\numberline {3.1}LBRAG の全体構成}{12}{section.3.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3.1}{\ignorespaces LBRAG の全体構成}}{13}{figure.3.1}\protected@file@percent }
+\newlabel{fig:lbrag_overview}{{3.1}{13}{LBRAG の全体構成}{figure.3.1}{}}
+\newlabel{fig:lbrag_overview@cref}{{[figure][1][3]3.1}{[1][12][]13}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3.2}多言語混合検索}{14}{section.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2.1}多言語エンコーダによる初期検索}{14}{subsection.3.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2.2}LLM による listwise 再ランキング}{14}{subsection.3.2.2}\protected@file@percent }
+\newlabel{eq:retr_score}{{3.3}{14}{LLM による listwise 再ランキング}{equation.3.3}{}}
+\newlabel{eq:retr_score@cref}{{[equation][3][3]3.3}{[1][14][]14}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3.3}選択的言語ブリッジ}{14}{section.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3.1}翻訳対象段落の選択}{15}{subsection.3.3.1}\protected@file@percent }
+\newlabel{eq:bridge_opt}{{3.4}{15}{翻訳対象段落の選択}{equation.3.4}{}}
+\newlabel{eq:bridge_opt@cref}{{[equation][4][3]3.4}{[1][15][]15}{}{}{}}
+\newlabel{eq:rho}{{3.5}{15}{翻訳対象段落の選択}{equation.3.5}{}}
+\newlabel{eq:rho@cref}{{[equation][5][3]3.5}{[1][15][]15}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3.2}文単位アライメントとスロット整合性検証}{16}{subsection.3.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3.4}証拠融合と生成プロンプト設計}{16}{section.3.4}\protected@file@percent }
+\newlabel{eq:weight}{{3.6}{17}{証拠融合と生成プロンプト設計}{equation.3.6}{}}
+\newlabel{eq:weight@cref}{{[equation][6][3]3.6}{[1][16][]17}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3.5}推論プロセスのまとめ}{17}{section.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {第4章}実証分析}{18}{chapter.4}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\jsc@mpt }}
+\@writefile{lot}{\addvspace {10\jsc@mpt }}
+\@writefile{toc}{\contentsline {section}{\numberline {4.1}実験設計の概要}{18}{section.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.2}データセットと知識ベース}{19}{section.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2.1}MKQA}{19}{subsection.4.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2.2}知識ベース構築（QA-memory）}{19}{subsection.4.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2.3}クロスリンガル条件の構成}{19}{subsection.4.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.3}比較手法}{19}{section.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.4}実装条件}{20}{section.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.1}検索・再ランキング}{20}{subsection.4.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.2}翻訳・アライメント}{20}{subsection.4.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.3}生成モデルとプロンプト}{20}{subsection.4.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4.4}実験環境}{21}{subsection.4.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.5}評価指標}{21}{section.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.1}EM と F1}{21}{subsection.4.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.2}RLC と RLC-OK}{21}{subsection.4.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.3}翻訳コスト}{21}{subsection.4.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.4}CNBE（Cost-Normalized Bridging Efficiency）}{21}{subsection.4.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5.5}SAS（Semantic Agreement Score）}{22}{subsection.4.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.6}評価プロトコル}{22}{section.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4.7}本実験設定の簡略化点と限界}{22}{section.4.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {第5章}実験結果}{23}{chapter.5}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\jsc@mpt }}
+\@writefile{lot}{\addvspace {10\jsc@mpt }}
+\@writefile{toc}{\contentsline {section}{\numberline {5.1}全体結果（主要指標）}{23}{section.5.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5.1}{\ignorespaces MKQA（$n=100$）における性能比較（平均$\pm $標準偏差）}}{23}{table.5.1}\protected@file@percent }
+\newlabel{tab:mkqa_main_results}{{5.1}{23}{MKQA（$n=100$）における性能比較（平均$\pm $標準偏差）}{table.5.1}{}}
+\newlabel{tab:mkqa_main_results@cref}{{[table][1][5]5.1}{[1][23][]23}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5.2}図による可視化}{23}{section.5.2}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {5.1}{\ignorespaces EM/F1 の比較（run \texttt  {20251214\_2251}）}}{24}{figure.5.1}\protected@file@percent }
+\newlabel{fig:mkqa_em_f1}{{5.1}{24}{EM/F1 の比較（run \texttt {20251214\_2251}）}{figure.5.1}{}}
+\newlabel{fig:mkqa_em_f1@cref}{{[figure][1][5]5.1}{[1][23][]24}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5.2}{\ignorespaces RLC の比較（run \texttt  {20251214\_2251}）}}{24}{figure.5.2}\protected@file@percent }
+\newlabel{fig:mkqa_rlc}{{5.2}{24}{RLC の比較（run \texttt {20251214\_2251}）}{figure.5.2}{}}
+\newlabel{fig:mkqa_rlc@cref}{{[figure][2][5]5.2}{[1][24][]24}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5.3}{\ignorespaces 翻訳コストと CNBE の比較（run \texttt  {20251214\_2251}）}}{25}{figure.5.3}\protected@file@percent }
+\newlabel{fig:mkqa_cost_cnbe}{{5.3}{25}{翻訳コストと CNBE の比較（run \texttt {20251214\_2251}）}{figure.5.3}{}}
+\newlabel{fig:mkqa_cost_cnbe@cref}{{[figure][3][5]5.3}{[1][24][]25}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5.4}{\ignorespaces SAS（意味一致スコア）の比較（run \texttt  {20251214\_2251}）}}{25}{figure.5.4}\protected@file@percent }
+\newlabel{fig:mkqa_sas}{{5.4}{25}{SAS（意味一致スコア）の比較（run \texttt {20251214\_2251}）}{figure.5.4}{}}
+\newlabel{fig:mkqa_sas@cref}{{[figure][4][5]5.4}{[1][25][]25}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5.3}考察}{26}{section.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3.1}正確性（EM/F1）}{26}{subsection.5.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3.2}出力言語の一貫性（RLC）}{26}{subsection.5.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3.3}翻訳コストと効率（CNBE）}{26}{subsection.5.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3.4}意味一致（SAS）}{26}{subsection.5.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3.5}限界と今後の検証}{26}{subsection.5.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{\numberline {第6章}おわりに}{28}{chapter.6}\protected@file@percent }
+\@writefile{lof}{\addvspace {10\jsc@mpt }}
+\@writefile{lot}{\addvspace {10\jsc@mpt }}
+\bibcite{Lewis2020RAG}{1}
+\bibcite{Chirkova2023mRAG}{2}
+\bibcite{Zhang2024CrossRAG}{3}
+\bibcite{Li2024DKMRAG}{4}
+\bibcite{Chen2025DRAG}{5}
+\bibcite{Asai2021XORQA}{6}
+\bibcite{Chen2025XRAG}{7}
+\@writefile{toc}{\contentsline {chapter}{参考文献}{30}{chapter*.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{謝辞}{31}{chapter*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {chapter}{付録}{32}{appendix*.5}\protected@file@percent }
+\newlabel{chap:appendix-code}{{6}{32}{付録A}{appendix*.5}{}}
+\newlabel{chap:appendix-code@cref}{{[chapter][0][]}{[1][32][]32}{}{}{}}
+\newlabel{lst:lbrag-example}{{1}{32}{LBRAG　placeholder}{lstlisting.Alph0.1}{}}
+\newlabel{lst:lbrag-example@cref}{{[listing][1][0]1}{[1][32][]32}{}{}{}}
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {1}LBRAG　placeholder}{32}{lstlisting.Alph0.1}\protected@file@percent }
+\gdef \@abspage@last{33}
